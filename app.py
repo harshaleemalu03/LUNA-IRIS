@@ -1,5 +1,6 @@
 import os
 import sys
+import spaces
 import uvicorn
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -9,6 +10,10 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 from api.app import app
+
+@spaces.GPU
+def gpu_marker():
+    return "LUNA-IRiS GPU enabled"
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=7860)
