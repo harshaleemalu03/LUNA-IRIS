@@ -12,3 +12,4 @@ uvicorn
 python-multipart
 opencv-python-headless
 huggingface_hub
+einops
