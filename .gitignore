@@ -1,0 +1,15 @@
+models/romav2_stereolunar_finetuned.pt
+
+backend/uploads/
+backend/outputs/
+backend/.venv/
+backend/.venv312/
+
+__pycache__/
+*.pyc
+.DS_Store
+
+backend/benchmark_results/**/*.png
+backend/overlap_preview.png
+backend/third_party/RoMaV2/assets/*.png
+backend/third_party/RoMaV2/assets/*.jpg
