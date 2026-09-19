@@ -1,3 +1,8 @@
+---
+title: LUNA-IRiS
+sdk: gradio
+app_file: app.py
+---
 ````markdown
 # 🌙 Luna-tics
 
@@ -136,3 +141,4 @@ __pycache__/
 ```
 
 `uploads/` and `outputs/` are generated automatically when the application runs.
+
