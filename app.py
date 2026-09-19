@@ -21,6 +21,12 @@ MODEL_PATH = hf_hub_download(
 
 os.environ["ROMA2_WEIGHTS_PATH"] = MODEL_PATH
 
+import importlib
+import torch
+
+roma_device = importlib.import_module("romav2.device")
+roma_device.device = torch.device("cpu")
+
 from api.app import app
 
 @spaces.GPU
