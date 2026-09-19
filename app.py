@@ -16,4 +16,10 @@ def gpu_marker():
     return "LUNA-IRiS GPU enabled"
 
 if __name__ == "__main__":
+    from spaces.zero import startup
+    try:
+        startup()
+    except Exception as e:
+        print(f"ZeroGPU startup: {e}", flush=True)
+
     uvicorn.run(app, host="0.0.0.0", port=7860)
