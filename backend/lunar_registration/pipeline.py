@@ -162,6 +162,36 @@ def determine_adaptive_matcher(
     }
 
 
+def note_winning_arm_support(
+    contingency: Dict[str, Any],
+    winner_method: str,
+    winner_n_inliers: int,
+) -> Dict[str, Any]:
+    """Task 11: keep contingency_fallback truthful about the arm that WON.
+
+    WHY: the report saw `triggered: False` while the winning arm carried 0
+    geometrically valid inliers — every arm failed to produce verifiable
+    support, which is a contingency state even when no alternate arm
+    remained to run (fallback_matcher stays None: detected, nothing left to
+    try). If the matcher stage already recorded a contingency, the earlier
+    reason is kept and this fact is appended — the summary must carry both.
+    Mutates and returns `contingency`."""
+    if winner_n_inliers > 0:
+        return contingency
+    fact = (
+        f"winning arm '{winner_method}' produced 0 geometrically valid "
+        "inliers — matcher output has no verifiable support"
+    )
+    if contingency.get("triggered"):
+        prior = contingency.get("reason")
+        contingency["reason"] = f"{prior}; {fact}" if prior else fact
+    else:
+        contingency["triggered"] = True
+        contingency["fallback_matcher"] = None
+        contingency["reason"] = fact
+    return contingency
+
+
 def run_pipeline(
     source_path: str, reference_path: str, out_dir: str,
     source_sensor: Optional[str] = None,
@@ -547,6 +577,12 @@ def run_pipeline(
     )
     best_method = comp_res["winner"]["method"]
     best = results_by_method[best_method]
+
+    # Task 11: the summary must not claim "no contingency" when the arm that
+    # won the competition carries zero geometrically valid inliers.
+    note_winning_arm_support(
+        contingency_fallback, best_method, best["metrics"].n_inliers,
+    )
 
     # ---- Orthogonal Verification Gate (gate_cheap) ----
     primary_H = best["hom_result"].H if not isinstance(best["hom_result"], list) else (
