@@ -230,48 +230,75 @@ function setupUploadCard(cardId, inputId, key, roleLabel) {
   card.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) handleFile(f); });
 
   function handleFile(file) {
-    const validType =
-        file.type.startsWith('image/') ||
-        /\.(tif|tiff|png|jpe?g|webp)$/i.test(file.name);
+  const validType =
+    file.type.startsWith('image/') ||
+    /\.(tif|tiff|png|jpe?g|webp)$/i.test(file.name);
 
-    if (!validType) {
-        flashInvalid();
-        return;
-    }
+  if (!validType) {
+    flashInvalid();
+    return;
+  }
 
-    if (file.size > 25 * 1024 * 1024) {
-        flashInvalid();
-        return;
-    }
+  if (file.size > 25 * 1024 * 1024) {
+    flashInvalid();
+    return;
+  }
 
-    const url = URL.createObjectURL(file);
-    const img = new Image();
+  const isTiff = /\.(tif|tiff)$/i.test(file.name);
 
-    img.onload = () => {
-        state[key] = {
-            file,
-            url,
-            w: img.naturalWidth,
-            h: img.naturalHeight
-        };
-
-        renderFilled(
-            card,
-            file,
-            url,
-            img.naturalWidth,
-            img.naturalHeight,
-            key,
-            cardId,
-            inputId,
-            roleLabel
-        );
-
-        updateSummary();
-        updateInputCompare();
+  if (isTiff) {
+    state[key] = {
+      file,
+      url: null,
+      w: 0,
+      h: 0
     };
 
-    img.src = url;
+    renderFilled(
+      card,
+      file,
+      null,
+      0,
+      0,
+      key,
+      cardId,
+      inputId,
+      roleLabel
+    );
+
+    updateSummary();
+    updateInputCompare();
+    return;
+  }
+
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+
+  img.onload = () => {
+    state[key] = {
+      file,
+      url,
+      w: img.naturalWidth,
+      h: img.naturalHeight
+    };
+
+    renderFilled(
+      card,
+      file,
+      url,
+      img.naturalWidth,
+      img.naturalHeight,
+      key,
+      cardId,
+      inputId,
+      roleLabel
+    );
+
+    updateSummary();
+    updateInputCompare();
+  };
+
+  img.src = url;
 }
   function flashInvalid() { card.style.borderColor = 'var(--err)'; setTimeout(() => card.style.borderColor = '', 500); }
 }
@@ -279,9 +306,16 @@ function setupUploadCard(cardId, inputId, key, roleLabel) {
 function renderFilled(card, file, url, w, h, key, cardId, inputId, roleLabel) {
   card.classList.add('filled');
   const idxLabel = key === 'source' ? 'SOURCE' : 'REFERENCE';
+
+  const preview = url
+    ? `<img class="preview-img" src="${url}" alt="Preview of ${idxLabel}">`
+    : `<div class="preview-img tiff-placeholder">
+         <span>TIFF</span>
+       </div>`;
+
   card.innerHTML = `
-    <input type="file" id="${inputId}" accept="image/*" aria-label="Upload ${idxLabel}">
-    <img class="preview-img" src="${url}" alt="Preview of ${idxLabel}">
+    <input type="file" id="${inputId}" accept="image/png,image/jpeg,image/tiff,image/webp" aria-label="Upload ${idxLabel}">
+    ${preview}
     <div class="top-row">
       <span class="idx">${idxLabel}</span>
       <span class="status-chip">READY</span>
@@ -289,33 +323,95 @@ function renderFilled(card, file, url, w, h, key, cardId, inputId, roleLabel) {
     <div class="preview-overlay">
       <div class="file-meta">
         <div class="name">${file.name}</div>
-        <div class="dims">${w} × ${h} · ${(file.size/1024/1024).toFixed(1)}MB</div>
+        <div class="dims">${w && h ? `${w} × ${h} · ` : ''}${(file.size / 1024 / 1024).toFixed(1)}MB</div>
       </div>
       <div class="file-actions">
         <button type="button" class="replace-btn" aria-label="Replace ${idxLabel}" title="Replace">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 7a6 6 0 0110-4.2M13 7a6 6 0 01-10 4.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M11 1v2.8h-2.8M3 13v-2.8h2.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M1 7a6 6 0 0110-4.2M13 7a6 6 0 01-10 4.2"
+              stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            <path d="M11 1v2.8h-2.8M3 13v-2.8h2.8"
+              stroke="currentColor" stroke-width="1.3" stroke-linecap="round"
+              stroke-linejoin="round"/>
+          </svg>
         </button>
+
         <button type="button" class="remove-btn" aria-label="Remove ${idxLabel}" title="Remove">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><line x1="2" y1="2" x2="12" y2="12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><line x1="12" y1="2" x2="2" y2="12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <line x1="2" y1="2" x2="12" y2="12"
+              stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            <line x1="12" y1="2" x2="2" y2="12"
+              stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
         </button>
       </div>
     </div>`;
+
   const newInput = card.querySelector('input[type=file]');
-  newInput.addEventListener('change', () => { if (newInput.files[0]) reuploadHandler(newInput.files[0]); });
-  card.querySelector('.replace-btn').addEventListener('click', (e) => { e.preventDefault(); newInput.click(); });
-  card.querySelector('.remove-btn').addEventListener('click', (e) => { e.preventDefault(); resetCard(); });
+
+  newInput.addEventListener('change', () => {
+    if (newInput.files[0]) {
+      reuploadHandler(newInput.files[0]);
+    }
+  });
+
+  card.querySelector('.replace-btn').addEventListener('click', (e) => {
+    e.preventDefault();
+    newInput.click();
+  });
+
+  card.querySelector('.remove-btn').addEventListener('click', (e) => {
+    e.preventDefault();
+    resetCard();
+  });
 
   function reuploadHandler(file) {
+    const isTiff = /\.(tif|tiff)$/i.test(file.name);
+
+    if (isTiff) {
+      state[key] = {
+        file,
+        url: null,
+        w: 0,
+        h: 0
+      };
+
+      renderFilled(card, file, null, 0, 0, key, cardId, inputId, roleLabel);
+      updateSummary();
+      updateInputCompare();
+      return;
+    }
+
     const url2 = URL.createObjectURL(file);
     const img2 = new Image();
+
     img2.onload = () => {
-      state[key] = { file, url: url2, w: img2.naturalWidth, h: img2.naturalHeight };
-      renderFilled(card, file, url2, img2.naturalWidth, img2.naturalHeight, key, cardId, inputId, roleLabel);
+      state[key] = {
+        file,
+        url: url2,
+        w: img2.naturalWidth,
+        h: img2.naturalHeight
+      };
+
+      renderFilled(
+        card,
+        file,
+        url2,
+        img2.naturalWidth,
+        img2.naturalHeight,
+        key,
+        cardId,
+        inputId,
+        roleLabel
+      );
+
       updateSummary();
       updateInputCompare();
     };
+
     img2.src = url2;
   }
+
   function resetCard() {
     state[key] = null;
     card.classList.remove('filled');
