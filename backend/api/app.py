@@ -193,6 +193,7 @@ async def register(
                     "run_id": run_id,
                     "failure_reason": summary.get("failure_reason"),
                     "low_precision": summary.get("subpixel_refine", {}).get("low_precision"),
+                    "subpixel_refine_reason": summary.get("subpixel_refine", {}).get("reason"),
                     "orthogonal_gate": summary.get("orthogonal_gate"),
                     "condition_routing": summary.get("condition_routing"),
                     "gsd_scale_prior": summary.get("gsd_scale_prior"),
@@ -224,6 +225,7 @@ async def register(
             "passed": True,
             "failure_reason": None,
             "low_precision": summary.get("subpixel_refine", {}).get("low_precision", False),
+            "subpixel_refine_reason": summary.get("subpixel_refine", {}).get("reason"),
             "orthogonal_gate_passed": summary.get("orthogonal_gate", {}).get("passed"),
         }
 

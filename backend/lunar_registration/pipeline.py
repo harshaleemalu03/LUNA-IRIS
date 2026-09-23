@@ -593,6 +593,25 @@ def run_pipeline(
         ref_inc_mean = float(np.nanmean(ref_incidence)) if ref_incidence is not None else 0.0
         illum_delta_deg = abs(src_inc_mean - ref_inc_mean)
         subpixel_refine_out = refine_tile(src_scaled, ref.data, illum_delta_deg=illum_delta_deg)
+        # Task 8: the refine's inputs (src_scaled vs ref.data) never include
+        # the matcher's transform, so its dx/dy are the GROSS
+        # source-vs-reference offset — identical for every matcher on this
+        # pair (the report observed 123.5054/271.0260 with pwift and roma2
+        # alike). That is degenerate as a "subpixel refinement" claim: force
+        # low_precision and say why, on top of any value-level objections
+        # refine_tile itself raised (weak peak, non-subpixel magnitude).
+        structural_reason = (
+            "matcher-independent inputs: refine correlates src_scaled vs "
+            "reference without the matcher's transform — dx/dy reproduce the "
+            "gross source-vs-reference offset (identical for every matcher "
+            "on this pair), not a registration residual"
+        )
+        refine_value_reason = subpixel_refine_out.get("reason")
+        subpixel_refine_out["reason"] = (
+            f"{refine_value_reason}; {structural_reason}" if refine_value_reason
+            else structural_reason
+        )
+        subpixel_refine_out["low_precision"] = True
 
         # ---- Stage 6: georeferencing and output ----
         registered = register_image(src_scaled, ref.data.shape, best["hom_result"])
@@ -655,6 +674,7 @@ def run_pipeline(
             "dx": subpixel_refine_out.get("dx"),
             "dy": subpixel_refine_out.get("dy"),
             "low_precision": subpixel_refine_out.get("low_precision", False),
+            "reason": subpixel_refine_out.get("reason"),
         },
         "metrics": {
             m: {

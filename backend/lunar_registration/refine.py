@@ -14,6 +14,15 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import cv2
 import numpy as np
 
+# Task 8: "subpixel" literally means < 1 px — corrections beyond this bound
+# are gross source-vs-reference offsets, not registration residuals (the
+# report observed 123.5054/271.0260 px reported as subpixel refinement).
+SUBPIXEL_MAX_PX: float = 1.0
+
+# Minimum cv2.phaseCorrelate response to consider the peak trustworthy;
+# below this the peak is dominated by noise/repetitive texture.
+WEAK_PEAK_MIN_RESPONSE: float = 0.2
+
 
 def compute_texture_energy(img: np.ndarray) -> float:
     """Compute normalized gradient energy as a measure of structural texture."""
@@ -58,6 +67,18 @@ def choose_refiner(
             return "ecc"
 
 
+def _non_subpixel_reason(dx: float, dy: float, method_name: str) -> Optional[str]:
+    """Task 8: a correction beyond +/-SUBPIXEL_MAX_PX cannot be a subpixel
+    refinement — name it instead of silently reporting it as one."""
+    if max(abs(dx), abs(dy)) > SUBPIXEL_MAX_PX:
+        return (
+            f"non-subpixel correction from {method_name}: dx={dx:.4f}, "
+            f"dy={dy:.4f} px exceeds +-{SUBPIXEL_MAX_PX}px — measures the "
+            "gross source/reference offset, not a registration residual"
+        )
+    return None
+
+
 def refine_tile(
     tile_src: np.ndarray,
     tile_ref: np.ndarray,
@@ -68,7 +89,12 @@ def refine_tile(
 ) -> Dict[str, Any]:
     """Execute cause-branched subpixel refinement on a tile pair.
 
-    Returns {dx, dy, cov2x2, method, low_precision: bool} in reference pixels.
+    Returns {dx, dy, cov2x2, method, low_precision, reason} in reference
+    pixels. `reason` is None when no precision objection applies, otherwise
+    it names WHY the estimate is low precision (weak phase-correlation peak,
+    correction beyond +/-SUBPIXEL_MAX_PX, refiner skipped) — a bare boolean
+    could not say (Task 8). The pipeline adds the structural
+    matcher-independence objection on top of these value-level ones.
     """
     if texture_energy is None:
         texture_energy = compute_texture_energy(tile_src)
@@ -99,6 +125,10 @@ def refine_tile(
             "cov2x2": np.diag([25.0, 25.0]).astype(np.float64),
             "method": method,
             "low_precision": True,
+            "reason": (
+                f"refiner '{method}' skipped: illumination/texture conditions "
+                "too poor for a subpixel estimate"
+            ),
         }
 
     if method == "ecc":
@@ -115,7 +145,9 @@ def refine_tile(
             dx = float(M[0, 2])
             dy = float(M[1, 2])
             cov = np.diag([0.05, 0.05]).astype(np.float64)
-            return {"dx": dx, "dy": dy, "cov2x2": cov, "method": "ecc", "low_precision": False}
+            ecc_reason = _non_subpixel_reason(dx, dy, "ECC")
+            return {"dx": dx, "dy": dy, "cov2x2": cov, "method": "ecc",
+                    "low_precision": ecc_reason is not None, "reason": ecc_reason}
         except cv2.error:
             # Fall back to phase correlation on ECC divergence
             method = "phase"
@@ -127,12 +159,25 @@ def refine_tile(
     sigma = float(max(0.1, 1.0 / max(response, 1e-3)))
     cov = np.diag([sigma, sigma]).astype(np.float64)
 
+    # Task 8: name every precision objection instead of a bare boolean.
+    reasons = []
+    if response < WEAK_PEAK_MIN_RESPONSE:
+        reasons.append(
+            f"weak phase-correlation peak: response={response:.3f} < "
+            f"{WEAK_PEAK_MIN_RESPONSE}"
+        )
+    non_sub = _non_subpixel_reason(float(dx), float(dy), "phase correlation")
+    if non_sub:
+        reasons.append(non_sub)
+    reason = "; ".join(reasons) if reasons else None
+
     return {
         "dx": float(dx),
         "dy": float(dy),
         "cov2x2": cov,
         "method": method,
-        "low_precision": bool(response < 0.2),
+        "low_precision": reason is not None,
+        "reason": reason,
     }
 
 

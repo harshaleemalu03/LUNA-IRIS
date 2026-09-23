@@ -44,7 +44,7 @@
   - Verify: forced inc/em run no longer yields 0 source keypoints silently
   - Files: `backend/lunar_registration/pwift.py:155-196,252-255`, `config.py:87`
   - Deps: none | Scope: S
-- [ ] Task 8: Subpixel-refine honesty
+- [x] Task 8: Subpixel-refine honesty
   - AC: matcher-independent identical dx/dy (123.5054…/271.0260…) detected as degenerate → `low_precision: true` with reason, surfaced in summary/API
   - Verify: two different matchers on same pair → flag raised when phase-correlation peak weak or values identical
   - Files: `backend/lunar_registration/pipeline.py` (refine ~l.504) + summary builder
