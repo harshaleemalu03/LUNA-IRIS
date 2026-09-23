@@ -38,6 +38,8 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
+import math
 import os
 import warnings
 from typing import Any, Dict, List, Optional, Tuple
@@ -62,11 +64,34 @@ from .metrics import compute_metrics
 from .pwift import reprojection_cleanup
 
 
+logger = logging.getLogger(__name__)
+
+# Largest image the illumination/matching stages can safely process in memory
+# on the CPU-only demo box (~2000x2000). Module-level so tests can shrink it.
+MAX_SAFE_PIXELS = 4_000_000
+
+
 def _parse_window(s: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
     if not s:
         return None
     x, y, w, h = (int(v) for v in s.split(","))
     return x, y, w, h
+
+
+def _center_tile_window(height: int, width: int, max_pixels: int) -> Tuple[int, int, int, int]:
+    """Largest centered crop not exceeding max_pixels, native resolution kept.
+
+    WHY: an explicit crop window is the caller's choice; its absence is not —
+    the fallback must preserve GSD (no rescaling) so the scale prior stays valid.
+    """
+    if height * width <= max_pixels:
+        return 0, 0, width, height
+    scale = math.sqrt(max_pixels / (height * width))
+    nh = max(1, int(round(height * scale)))
+    nw = max(1, int(round(width * scale)))
+    x0 = (width - nw) // 2
+    y0 = (height - nh) // 2
+    return x0, y0, nw, nh
 
 
 def determine_adaptive_matcher(
@@ -218,19 +243,32 @@ def run_pipeline(
         nac_pho_band_incidence=nac_pho_band_incidence,
     )
 
-    _MAX_SAFE_PIXELS = 4_000_000  # ~2000x2000
-    if window is None:
-        for _tag, _loaded in (("source", src), ("reference", ref)):
-            if _loaded.data.size > _MAX_SAFE_PIXELS:
-                _h, _w = _loaded.data.shape
-                raise RuntimeError(
-                    f"{_tag} image '{_loaded.path}' is {_w}x{_h} "
-                    f"({_loaded.data.size:,} px) and no crop window was given. "
-                    "Running the full illumination/matching stage at this "
-                    "resolution will very likely exhaust memory. Pass "
-                    "--source-window x,y,w,h and --reference-window x,y,w,h "
-                    "to crop the common geographic overlap region."
-                )
+    # Size guard: an image with no crop window is auto-center-tiled to
+    # MAX_SAFE_PIXELS with a loud warning; an image with an explicit window
+    # (shared or per-image) is the caller's choice and proceeds as given.
+    for _tag, _loaded, _img_window in (
+        ("source", src, source_window),
+        ("reference", ref, reference_window),
+    ):
+        if _img_window is None and _loaded.data.size > MAX_SAFE_PIXELS:
+            _h, _w = _loaded.data.shape[:2]
+            _x0, _y0, _nw, _nh = _center_tile_window(_h, _w, MAX_SAFE_PIXELS)
+            logger.warning(
+                "auto-tile: %s image '%s' is %sx%s (%s px), above the %s px "
+                "safety limit and no crop window was given; center-tiling to "
+                "window %s,%s,%s,%s. Pass --source-window x,y,w,h and "
+                "--reference-window x,y,w,h (API: source_window/reference_window) "
+                "to target the geographic overlap region instead.",
+                _tag, _loaded.path, _w, _h, f"{_loaded.data.size:,}",
+                f"{MAX_SAFE_PIXELS:,}", _x0, _y0, _nw, _nh,
+            )
+            _rows = np.s_[_y0:_y0 + _nh]
+            _cols = np.s_[_x0:_x0 + _nw]
+            _loaded.data = _loaded.data[_rows, _cols]
+            for _arr_name in ("incidence_deg", "emission_deg", "phase_deg"):
+                _arr = getattr(_loaded, _arr_name, None)
+                if isinstance(_arr, np.ndarray) and _arr.shape[:2] == (_h, _w):
+                    setattr(_loaded, _arr_name, _arr[_rows, _cols])
 
     src_incidence, src_emission, src_phase = src.incidence_deg, src.emission_deg, src.phase_deg
     if source_incidence_path and source_emission_path:

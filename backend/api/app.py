@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,7 +10,7 @@ from pathlib import Path
 import shutil
 import uuid
 
-from lunar_registration.pipeline import run_pipeline
+from lunar_registration.pipeline import run_pipeline, _parse_window
 
 
 # --------------------------------------------------
@@ -96,8 +98,20 @@ def sanitize_for_json(obj):
 async def register(
     source: UploadFile = File(...),
     reference: UploadFile = File(...),
-    sensor: str = Form(...)
+    sensor: str = Form(...),
+    source_window: Optional[str] = Form(None),
+    reference_window: Optional[str] = Form(None),
 ):
+    # Parse before the main try/except so malformed input is a client error
+    # (422), not a 500 wrapped around the ValueError.
+    try:
+        src_win = _parse_window(source_window)
+        ref_win = _parse_window(reference_window)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Malformed crop window (expected 'x,y,w,h'): {e}",
+        )
 
     run_id = str(uuid.uuid4())
 
@@ -150,6 +164,8 @@ async def register(
             reference_path=str(reference_path),
             out_dir=str(run_output_dir),
             source_sensor=sensor,
+            source_window=src_win,
+            reference_window=ref_win,
             matcher="auto",
             device="cpu",
             use_eloftr=True,
