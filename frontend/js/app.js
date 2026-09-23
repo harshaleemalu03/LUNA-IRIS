@@ -239,7 +239,7 @@ function setupUploadCard(cardId, inputId, key, roleLabel) {
     return;
   }
 
-  if (file.size > 25 * 1024 * 1024) {
+  if (file.size > 100 * 1024 * 1024) {
     flashInvalid();
     return;
   }
@@ -651,3 +651,4 @@ function renderResults(res) {
 
 /* initial idle canvas frame */
 drawMatchPoints(procCanvas, null, null, { progress: 0 });
+

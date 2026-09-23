@@ -146,6 +146,40 @@ async def register(
         # Run Luna-tics pipeline
         # --------------------------------------------------
 
+        from PIL import Image
+
+        source_img = Image.open(source_path)
+        reference_img = Image.open(reference_path)
+
+        source_w, source_h = source_img.size
+        reference_w, reference_h = reference_img.size
+
+        MAX_PIXELS = 4_000_000
+
+        source_window = None
+        reference_window = None
+
+        if source_w * source_h > MAX_PIXELS:
+            scale = (MAX_PIXELS / (source_w * source_h)) ** 0.5
+            crop_w = max(1, int(source_w * scale))
+            crop_h = max(1, int(source_h * scale))
+            x = max(0, (source_w - crop_w) // 2)
+            y = max(0, (source_h - crop_h) // 2)
+            source_window = (x, y, crop_w, crop_h)
+
+        if reference_w * reference_h > MAX_PIXELS:
+            scale = (MAX_PIXELS / (reference_w * reference_h)) ** 0.5
+            crop_w = max(1, int(reference_w * scale))
+            crop_h = max(1, int(reference_h * scale))
+            x = max(0, (reference_w - crop_w) // 2)
+            y = max(0, (reference_h - crop_h) // 2)
+            reference_window = (x, y, crop_w, crop_h)
+
+        print(f"Source size: {source_w}x{source_h}")
+        print(f"Reference size: {reference_w}x{reference_h}")
+        print(f"Source window: {source_window}")
+        print(f"Reference window: {reference_window}")
+
         summary = run_pipeline(
             source_path=str(source_path),
             reference_path=str(reference_path),
@@ -154,6 +188,8 @@ async def register(
             matcher="auto",
             device="cpu",
             use_eloftr=True,
+            source_window=source_window,
+            reference_window=reference_window,
         )
 
         print("=" * 60)
