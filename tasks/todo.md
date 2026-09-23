@@ -16,7 +16,7 @@
   - Verify: Run 1 (no flags) now matches Run 2's regime/reason; Run exp-C behavior (chosen scale inside correct band) reproduced automatically
   - Files: `backend/lunar_registration/scale.py:1858`, `backend/lunar_registration/pipeline.py:244-257`
   - Deps: 2 | Scope: S
-- [ ] Task 4: Fail-closed verification + exit codes
+- [x] Task 4: Fail-closed verification + exit codes
   - AC: (a) `primary_H is None` → `passed: false`, nonzero exit, never emits valid-looking outputs; (b) gate FAIL → nonzero exit, outputs marked invalid; (c) "Proceeding with flagged confidence" removed; (d) `low_precision` surfaced in API response
   - Verify: Runs 2/3/3c scenario exits nonzero; a passing run exits 0 only when gate passed
   - Files: `backend/lunar_registration/pipeline.py:492,506,542-544`, `backend/app.py`

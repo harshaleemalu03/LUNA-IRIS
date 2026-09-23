@@ -14,3 +14,5 @@ opencv-python-headless
 huggingface_hub
 einops
 torchvision
+# load-bearing pin: 0.8.3 breaks EfficientLoFTR's import path (verified)
+kornia==0.6.8

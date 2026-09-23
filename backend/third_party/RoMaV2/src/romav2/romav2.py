@@ -89,16 +89,23 @@ class RoMaV2(nn.Module):
     threshold: float | None
     balanced_sampling: bool
 
-    def __init__(self, cfg: Cfg | None = None):
+    def __init__(self, cfg: Cfg | None = None, weights: dict | str | None = None):
         super().__init__()
         if cfg is None:
             # default
             cfg = RoMaV2.Cfg()
-            
-        weights = torch.hub.load_state_dict_from_url(
-            "https://github.com/Parskatt/RoMaV2/releases/download/v2.0.1/romav2.0.1.pt",
-            map_location="cpu"
-        )
+
+        # LUNA-IRiS Task 5 patch: caller-supplied weights replace the
+        # upstream unconditional base-checkpoint download. dict = state dict
+        # in hand; str = path to a checkpoint file; None = upstream behavior
+        # (fetch romav2.0.1.pt) so vendored demos/tests keep working.
+        if weights is None:
+            weights = torch.hub.load_state_dict_from_url(
+                "https://github.com/Parskatt/RoMaV2/releases/download/v2.0.1/romav2.0.1.pt",
+                map_location="cpu"
+            )
+        elif not isinstance(weights, dict):
+            weights = torch.load(str(weights), map_location="cpu", weights_only=False)
         self.f = Descriptor(cfg.descriptor)
         self.matcher = Matcher(cfg.matcher)
         self.cfg = cfg
