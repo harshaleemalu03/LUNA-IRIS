@@ -11,7 +11,7 @@
 const RegistrationAPI = (() => {
 
   const REGISTRATION_ENDPOINT =
-    'http://127.0.0.1:8000/api/register';
+  'https://harshaleemalu03-luna-iris.hf.space/api/register';
 
 
   async function register({ source, reference, sensor }, onStep) {
@@ -230,18 +230,49 @@ function setupUploadCard(cardId, inputId, key, roleLabel) {
   card.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) handleFile(f); });
 
   function handleFile(file) {
-    if (!file.type.startsWith('image/')) { flashInvalid(); return; }
-    if (file.size > 25 * 1024 * 1024) { flashInvalid(); return; }
+    const validType =
+        file.type.startsWith('image/') ||
+        /\.(tif|tiff|png|jpe?g|webp)$/i.test(file.name);
+
+    if (!validType) {
+        flashInvalid();
+        return;
+    }
+
+    if (file.size > 25 * 1024 * 1024) {
+        flashInvalid();
+        return;
+    }
+
     const url = URL.createObjectURL(file);
     const img = new Image();
+
     img.onload = () => {
-      state[key] = { file, url, w: img.naturalWidth, h: img.naturalHeight };
-      renderFilled(card, file, url, img.naturalWidth, img.naturalHeight, key, cardId, inputId, roleLabel);
-      updateSummary();
-      updateInputCompare();
+        state[key] = {
+            file,
+            url,
+            w: img.naturalWidth,
+            h: img.naturalHeight
+        };
+
+        renderFilled(
+            card,
+            file,
+            url,
+            img.naturalWidth,
+            img.naturalHeight,
+            key,
+            cardId,
+            inputId,
+            roleLabel
+        );
+
+        updateSummary();
+        updateInputCompare();
     };
+
     img.src = url;
-  }
+}
   function flashInvalid() { card.style.borderColor = 'var(--err)'; setTimeout(() => card.style.borderColor = '', 500); }
 }
 
@@ -498,7 +529,7 @@ function renderResults(res) {
   }
 
   const imageUrl =
-    'http://127.0.0.1:8000' + res.output_image;
+  'https://harshaleemalu03-luna-iris.hf.space' + res.output_image;
 
   console.log("MATCHES IMAGE URL:", imageUrl);
 
