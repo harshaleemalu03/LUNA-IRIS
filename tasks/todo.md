@@ -60,6 +60,11 @@
 - [x] `diagnose.py` windowed run clean — real IIRS pair, per-image windows 250×2000/300×2200, EXIT=0 through all stages + honest diagnosis (`/tmp/opencode/iris_runs/phase1_diagnose_windowed.log`)
 
 ## Phase 2 — Cleanup
-- [ ] Task 10: Wire or delete `resample_to_gsd` (`scale.py:1805`) — dead either way today
-- [ ] Task 11: Contingency-fallback logging — `triggered` reports truthfully when winning arm has 0 inliers
-- [ ] Task 12 (stretch): Tiepoint-derived coarse transform seeding the existing estimator (metadata wiring only; needs user go/no-go)
+- [x] Task 10: Wire or delete `resample_to_gsd` (`scale.py:1805`) — dead either way today — DELETED (real location `preprocessing.py:2002`; plan citation stale; zero references; commit `0d2b215`)
+- [x] Task 11: Contingency-fallback logging — `triggered` reports truthfully when winning arm has 0 inliers — `note_winning_arm_support()` (append-both-facts if already triggered; `fallback_matcher: None` = detected, no arm left); commit `96d0588`; RED 3×ImportError + KeyError → GREEN 4 passed; suite 80 passed
+- [x] Task 12 (stretch): Tiepoint-derived coarse transform seeding the existing estimator (metadata wiring only; needs user go/no-go) — DONE (user instruction = go); commit `bb9bf59`; seed judged by matcher inliers; real-pair evidence: canonical scale1.0089 vs prior1.00668 (0.22% apart), both real runs keep Phase-1 failure classes
+
+### Checkpoint: Phase 2
+- [x] Full suite green — 93 passed, 1 skipped (`/tmp/opencode/iris_runs/task12_suite.txt`)
+- [x] Real-pair failure classes unchanged vs Phase 1 — canonical exit 1 `no_transform` (tiepoint_coarse derived=true, seed_supported=false), IIRS easy (Phase-0 windows) exit 1 `no_confident_alignment` (derived=true); `tiepoint_coarse` truthful on both (`/tmp/opencode/iris_runs/task12_canonical_cli.log`, `task12_easy_cli.log`)
+- [x] Tiepoint seed cross-checks GSD prior on canonical pair — 0.22% apart via independent metadata paths (`/tmp/opencode/iris_runs/task12_real_pair_evidence.txt`)
