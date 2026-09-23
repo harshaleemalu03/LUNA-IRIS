@@ -245,7 +245,12 @@ def photometric_weighted_structural_maps(
 
     If no angle maps are given (e.g. the reference image, which usually has
     no photometric-geometry product of its own), W falls back to all-ones -
-    Eq 1-2 with no invalid pixels, i.e. fully reliable everywhere.
+    Eq 1-2 with no invalid pixels, i.e. fully reliable everywhere. Task 7:
+    that fallback is now WARNED about ("Akimov inert, W=1") instead of
+    silent, and a THIRD path detects akimov weights that would collapse
+    `w_soft` to all-zero — exp-B: Eq 7/Eq 9 become identically zero and
+    every keypoint is annihilated with no message — and falls back to the
+    same unweighted W=1 computation with a hard warning.
 
     Returns a dict: {"M_PW", "m_PW", "MIM", "w", "w_soft", "mask"}.
     """
@@ -253,12 +258,43 @@ def photometric_weighted_structural_maps(
     if incidence_deg is not None and emission_deg is not None:
         W_norm = akimov_weight(incidence_deg, emission_deg, phase_deg)
     else:
+        # Task 7 guard 1: the pwift_akimov branch reaches here without BOTH
+        # angle maps (reference images by design, or a source whose
+        # label/sidecar angles never loaded). W=1 is the correct fallback —
+        # but say so, so nobody believes Akimov weighting is active.
+        warnings.warn(
+            "pwift_akimov: both incidence and emission maps are required for "
+            f"Akimov weighting (incidence="
+            f"{'present' if incidence_deg is not None else 'missing'}, "
+            f"emission={'present' if emission_deg is not None else 'missing'}) "
+            "- computing UNWEIGHTED structural maps (W=1); Akimov weighting "
+            "is INERT for this image"
+        )
         W_norm = np.ones_like(img, dtype=np.float32)
 
     # L(x): illumination-mask stand-in - see module docstring SWAP POINT.
     L = img
     mW, mask = compute_valid_mask(W_norm, L, w_bg, on_thr)
     w_soft = soft_weight(W_norm, w_soft_lo, w_soft_hi)
+
+    # Task 7 guard 2 (exp-B): weights that collapse w_soft (and/or the mW
+    # reliability mask) to nothing make pc_pw_o (Eq 7) and Sc(x) (Eq 9)
+    # identically zero -> ZERO keypoints, previously with no message at all.
+    # Uniform near-terminator angles hit this via akimov_weight's
+    # zero-variance branch (raw w0 below w_soft_lo everywhere). Fall back to
+    # the unweighted path — the same W=1 computation the no-angles branch
+    # does — so structural energy and keypoints survive.
+    if not np.any(w_soft > 0.0) or not np.any(mW):
+        warnings.warn(
+            "Akimov weight collapse detected: "
+            f"w_soft all-zero={not np.any(w_soft > 0.0)}, "
+            f"reliability mask empty={not np.any(mW)} - would annihilate "
+            "every keypoint (exp-B); falling back to the UNWEIGHTED "
+            "structural maps (W=1)"
+        )
+        W_norm = np.ones_like(img, dtype=np.float32)
+        mW, mask = compute_valid_mask(W_norm, L, w_bg, on_thr)
+        w_soft = soft_weight(W_norm, w_soft_lo, w_soft_hi)
 
     IMG = fft2(img)
     covx2 = np.zeros((rows, cols), dtype=np.float64)

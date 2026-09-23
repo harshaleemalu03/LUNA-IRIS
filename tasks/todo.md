@@ -21,25 +21,25 @@
   - Verify: Runs 2/3/3c scenario exits nonzero; a passing run exits 0 only when gate passed
   - Files: `backend/lunar_registration/pipeline.py:492,506,542-544`, `backend/app.py`
   - Deps: none (but coordinate with frontend response handling) | Scope: M
-- [ ] Task 5: RoMa fine-tune-only loading + kornia pin
+- [x] Task 5: RoMa fine-tune-only loading + kornia pin
   - AC: (a) `RoMaV2.__init__` no longer unconditionally downloads/loads base `romav2.0.1.pt` (`romav2.py:98-101,113`) — constructor accepts weights from the caller; (b) `matching.py:428-430` loads **only** the fine-tune from `ROMA2_WEIGHTS_PATH`, upgraded to `strict=True`; (c) cold start performs **no GitHub fetch**, base ckpt file not required anywhere on disk; (d) `kornia==0.6.8` pinned explicitly in requirements
   - Verify: unit test asserts `load_state_dict(strict=True)` passes with `ckpt["model"]` (907 keys); pipeline run with `ROMA2_WEIGHTS_PATH` set succeeds in an empty torch cache dir; `grep -r "romav2.0.1" backend/` shows no remaining runtime dependency
   - Files: `backend/third_party/RoMaV2/src/romav2/romav2.py:98-113`, `backend/lunar_registration/matching.py:425-430`, requirements
   - Deps: none | Scope: S
 
 ### Checkpoint: Phase 0
-- [ ] Canonical pair via API: runs, exits nonzero, `passed: false`, honest reason
-- [ ] Easy pair: exits 0 only with gate-passed transform
-- [ ] Prior ≈ 1.006, regime `polar_grazing`, no CLI flags
+- [x] Canonical pair via API: runs, exits nonzero, `passed: false`, honest reason (HTTP 422 + structured detail; server alive after)
+- [x] Easy pair: exits 0 only with gate-passed transform (safety property proven; negative finding: NO real zip pair registers — IIRS least-extreme pair fails gate honestly at 52.9px; exit-0 path covered by synthetic gate-pass e2e + CLI unit test; see ledger)
+- [x] Prior ≈ 1.006, regime `polar_grazing`, no CLI flags (CLI run: prior 1.006682, polar_grazing → hybrid_pwift_roma2, zero flags)
 - [ ] Human review before Phase 1
 
 ## Phase 1 — Correctness rot
-- [ ] Task 6: Peak-quality acceptance in scale/rotation search
+- [x] Task 6: Peak-quality acceptance in scale/rotation search (complete: 2b07368, 9 tests; RED ImportError -> GREEN 9 passed; suite 62 passed)
   - AC: boundary picks (0.575 / −180 / 3.0 / 15° observed) return "no confident alignment" instead of argmax; interior peak required
   - Verify: unit test with flat/corrupt similarity surface → returns None/no-confidence; good pair → returns interior peak
   - Files: `backend/lunar_registration/scale.py:43-91`, `coarse_to_fine_rotation_scale`
   - Deps: 3 | Scope: S
-- [ ] Task 7: Akimov guard
+- [x] Task 7: Akimov guard
   - AC: enabled-without-both-angles → warn + `W≡1` documented; `w_soft` collapsing to all-zero → hard warning + fall back to unweighted path (prevents exp-B annihilation)
   - Verify: forced inc/em run no longer yields 0 source keypoints silently
   - Files: `backend/lunar_registration/pwift.py:155-196,252-255`, `config.py:87`
