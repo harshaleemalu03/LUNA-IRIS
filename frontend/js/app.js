@@ -431,7 +431,7 @@ function originalCardHTML(idxLabel, inputId, roleLabel, key) {
       <div class="drop-label">Drop ${key} image</div>
       <div class="hint">or click to browse</div>
     </div>
-    <div class="bottom-row"><span class="fmt">JPG · PNG · TIFF — MAX 25MB</span></div>`;
+    <div class="bottom-row"><span class="fmt">JPG · PNG · TIFF — MAX 100MB</span></div>`;
 }
 
 setupUploadCard('cardSource', 'fileSource', 'source', 'MOVING');
@@ -651,4 +651,5 @@ function renderResults(res) {
 
 /* initial idle canvas frame */
 drawMatchPoints(procCanvas, null, null, { progress: 0 });
+
 
