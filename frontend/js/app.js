@@ -612,44 +612,53 @@ document.getElementById('retryBtn').addEventListener('click', () => { errorState
 function renderResults(res) {
   console.log("BACKEND RESPONSE:", res);
 
-  const outputImg = document.getElementById('outputImg');
+  const outputImg = document.getElementById("outputImg");
 
-  if (!outputImg) {
-    console.error('outputImg element not found');
-    return;
-  }
-
-  if (!res.output_image) {
-    console.error('No output_image in backend response');
+  if (!outputImg || !res.output_image) {
+    console.error("Output image or output_image missing");
     return;
   }
 
   const imageUrl =
-  'https://harshaleemalu03-luna-iris.hf.space' + res.output_image;
+    "https://harshaleemalu03-luna-iris.hf.space" + res.output_image;
 
   console.log("MATCHES IMAGE URL:", imageUrl);
 
   outputImg.onload = () => {
     console.log(
-      'MATCHES IMAGE LOADED:',
+      "MATCHES IMAGE LOADED:",
       outputImg.naturalWidth,
-      'x',
+      "x",
       outputImg.naturalHeight
     );
   };
 
   outputImg.onerror = () => {
-    console.error(
-      'MATCHES IMAGE FAILED TO LOAD:',
-      imageUrl
-    );
+    console.error("MATCHES IMAGE FAILED TO LOAD:", imageUrl);
   };
 
   outputImg.src = imageUrl;
+
+  const metrics = res.metrics || {};
+  const methods = Object.keys(metrics);
+
+  if (!methods.length) {
+    console.warn("No metrics returned by backend");
+    return;
+  }
+
+  const data = metrics[methods[0]];
+  const el = document.getElementById("inlierRatio");
+
+  if (el && data.inlier_ratio != null) {
+    el.textContent = `${(data.inlier_ratio * 100).toFixed(2)}%`;
+  }
 }
-
-
 /* initial idle canvas frame */
 drawMatchPoints(procCanvas, null, null, { progress: 0 });
+
+
+
+
 
 
