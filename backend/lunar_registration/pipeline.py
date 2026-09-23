@@ -181,6 +181,7 @@ def run_pipeline(
     window: Optional[Tuple[int, int, int, int]] = None,
     source_window: Optional[Tuple[int, int, int, int]] = None,
     reference_window: Optional[Tuple[int, int, int, int]] = None,
+    reference_sensor: Optional[str] = None,
     matcher: Optional[str] = None,
     roma2_weights: Optional[str] = None,
     eloftr_checkpoint: Optional[str] = None,
@@ -237,7 +238,7 @@ def run_pipeline(
         nac_pho_band_incidence=nac_pho_band_incidence,
     )
     ref: LoadedImage = load_image(
-        reference_path, sensor_hint="LROC", window=reference_window,
+        reference_path, sensor_hint=reference_sensor, window=reference_window,
         nac_pho_path=reference_nac_pho_path,
         nac_pho_band_phase=nac_pho_band_phase, nac_pho_band_emission=nac_pho_band_emission,
         nac_pho_band_incidence=nac_pho_band_incidence,
@@ -286,6 +287,10 @@ def run_pipeline(
         inc_for_routing = float(np.nanmean(src_incidence))
     elif src.incidence_deg is not None:
         inc_for_routing = float(np.nanmean(src.incidence_deg))
+    elif src.sidecar_incidence_deg is not None:
+        # Scalar from the sidecar XML (e.g. Solar_incidence_angle 84.896724):
+        # explicit angles metadata beats any placeholder default.
+        inc_for_routing = float(src.sidecar_incidence_deg)
 
     resolved_matcher, routing_info = determine_adaptive_matcher(
         requested_matcher=matcher,

@@ -6,7 +6,7 @@
   - Verify: Run 0 scenario (full 16 MP reference, no window) no longer crashes
   - Files: `backend/app.py:95-100`, `backend/lunar_registration/pipeline.py:221-228`
   - Deps: none | Scope: S
-- [ ] Task 2: Metadata reader — GeoTIFF tags + sidecar XML
+- [x] Task 2: Metadata reader — GeoTIFF tags + sidecar XML (complete: 5 tests; real pair ratio 1.0067, incidence 84.896724)
   - AC: reads `ModelPixelScale` / corner tiepoints / CRS and sidecar XML (`Solar_incidence_angle`, `Sun_elevation`, `Sun_azimuth`) into `LoadedImage`; missing fields degrade to placeholder **with a log naming the field**
   - Verify: canonical pair reports GSD ratio ≈ 1.006 and incidence ≈ 84.896724
   - Files: `backend/lunar_registration/preprocessing.py` (new reader near l.369 patterns)

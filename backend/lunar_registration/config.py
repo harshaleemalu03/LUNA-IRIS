@@ -34,7 +34,7 @@ SENSOR_CONFIGS = {
         scale_range=(0.5, 3.0),
         homography_mode="local",
         approx_gsd_m=0.25,
-        label_keywords=("OHRC", "ORBITER HIGH RESOLUTION CAMERA"),
+        label_keywords=("OHRC", "OHRXXD", "ORBITER HIGH RESOLUTION CAMERA"),
     ),
     "TMC": SensorConfig(
         name="TMC",

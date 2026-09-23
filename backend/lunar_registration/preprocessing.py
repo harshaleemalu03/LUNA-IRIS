@@ -284,10 +284,13 @@ def detect_sensor(path: str, label_text: str = "") -> SensorConfig:
 
     warnings.warn(
         f"Could not auto-detect sensor for '{path}'. "
-        "Defaulting to OHRC."
+        "Defaulting to LROC."
     )
 
-    return get_sensor_config("OHRC")
+    # Neutral fallback: LROC (the historical reference-image default). OHRC
+    # is now detected by its OHRXXD product prefix, so unknown names no
+    # longer silently inherit OHRC's placeholder GSD.
+    return get_sensor_config("LROC")
 
 
 # ----------------------------------------------------------------------
