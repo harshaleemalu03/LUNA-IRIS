@@ -639,7 +639,7 @@ function renderResults(res) {
 
   outputImg.src = imageUrl;
 
-  const metrics = res.metrics || {};
+  const metrics = res.metrics || {};`r`n  console.log("REGISTRATION METRICS:", metrics);
   const methods = Object.keys(metrics);
 
   if (!methods.length) {
@@ -656,6 +656,7 @@ function renderResults(res) {
 }
 /* initial idle canvas frame */
 drawMatchPoints(procCanvas, null, null, { progress: 0 });
+
 
 
 
