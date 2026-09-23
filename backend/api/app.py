@@ -212,7 +212,13 @@ async def register(
             "success": True,
             "run_id": run_id,
             "status": "success",
-            "output_image": f"/outputs/{run_id}/{matches_filename}"
+            "output_image": f"/outputs/{run_id}/{matches_filename}",
+            "metrics": summary.get("metrics", {}),
+            "miho_gcps": summary.get("miho_gcps", {}),
+            "subpixel_refine": summary.get("subpixel_refine", {}),
+            "chosen_scale": summary.get("chosen_scale"),
+            "chosen_rotation_deg": summary.get("chosen_rotation_deg"),
+            "gsd_scale_prior": summary.get("gsd_scale_prior"),
         }
 
     except Exception as e:
