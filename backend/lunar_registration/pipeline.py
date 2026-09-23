@@ -305,9 +305,26 @@ def run_pipeline(
 
     # ---- Stage 1.5: GSD-aware scale prior, then coarse-to-fine search ----
     gsd_scale_prior = estimate_gsd_scale_prior(src, ref)
-    best_scale, best_rot = select_best_scale(
+    scale_rot = select_best_scale(
         src.data, ref.data, src.sensor, cfg, prior_scale=gsd_scale_prior,
     )
+    scale_search_failure = None
+    if scale_rot is None:
+        # Task 6: no confident alignment in the coarse search (argmax on a
+        # candidate boundary or flat similarity surface). The run fails
+        # closed below; continuing with an identity placeholder only so
+        # summary.json still records matcher/gate diagnostics for the
+        # failure report.
+        scale_search_failure = (
+            "no_confident_alignment: scale/rotation search returned no "
+            "interior peak (argmax on candidate boundary or flat similarity surface)"
+        )
+        warnings.warn(
+            f"{scale_search_failure} - continuing for diagnostics; "
+            "the run fails closed")
+        best_scale, best_rot = 1.0, 0.0
+    else:
+        best_scale, best_rot = scale_rot
     src_scaled = apply_scale(src.data, best_scale)
     src_scaled = apply_rotation(src_scaled, best_rot)
     src_incidence_scaled = apply_scale(src_incidence, best_scale) if src_incidence is not None else None
@@ -551,14 +568,17 @@ def run_pipeline(
     # Fail-closed verdict (Task 4): no valid transform, or a gate FAIL, is a
     # failed registration — never a "flagged confidence" success. Products are
     # withheld; summary.json still records why (the demo keys off exit codes).
-    failure_reason = None
-    if primary_H is None:
-        failure_reason = (
-            f"no_transform: matcher '{resolved_matcher}' produced no "
-            "geometrically valid transform"
-        )
-    elif ortho_eval is not None and not ortho_eval.get("pass", False):
-        failure_reason = f"verification_gate_failed: {ortho_eval.get('reason')}"
+    # Task 6: an unconfident coarse search is an UPSTREAM failure — it
+    # outranks whatever the gate reports about the mis-scaled diagnostic run.
+    failure_reason = scale_search_failure
+    if failure_reason is None:
+        if primary_H is None:
+            failure_reason = (
+                f"no_transform: matcher '{resolved_matcher}' produced no "
+                "geometrically valid transform"
+            )
+        elif ortho_eval is not None and not ortho_eval.get("pass", False):
+            failure_reason = f"verification_gate_failed: {ortho_eval.get('reason')}"
 
     if failure_reason is None:
         # ---- Stage 5: MiHo Piecewise Geometry + 6x6 Gridded GCP Optimizer (§2) ----

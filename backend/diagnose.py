@@ -68,7 +68,15 @@ def main():
         print("src incidence/emission: None (label didn't have them, or --angles-from-label not set)")
 
     print("\n=== Stage 5a: coarse scale/rotation search ===")
-    best_scale, best_rot = select_best_scale(src.data, ref.data, src.sensor, cfg)
+    scale_rot = select_best_scale(src.data, ref.data, src.sensor, cfg)
+    if scale_rot is None:
+        # Task 6: no confident alignment — resampling with a garbage scale
+        # would only produce misleading diagnostics below.
+        raise SystemExit(
+            "no confident alignment: scale/rotation search argmax was a "
+            "boundary pick or flat-surface tie; refusing to continue"
+        )
+    best_scale, best_rot = scale_rot
     print(f"chosen_scale={best_scale:.4f}, chosen_rotation_deg={best_rot}")
     src_scaled = apply_scale(src.data, best_scale)
     stats("src_scaled", src_scaled)

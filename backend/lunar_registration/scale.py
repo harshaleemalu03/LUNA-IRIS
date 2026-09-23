@@ -43,11 +43,14 @@ def build_pyramid(img: np.ndarray, sensor: SensorConfig, cfg: PipelineConfig) ->
 def select_best_scale(
     src_img: np.ndarray, dst_img: np.ndarray, sensor: SensorConfig, cfg: PipelineConfig,
     prior_scale: Optional[float] = None, prior_band_frac: float = 0.15,
-) -> Tuple[float, float]:
+) -> Optional[Tuple[float, float]]:
     """Runs the cheap coarse-to-fine correlation search (pwift.py) over a
     set of scale candidates to pick a starting (scale, rotation) estimate
     before the full matching stage runs. Returns (best_scale,
-    best_rotation_deg).
+    best_rotation_deg), or None when the search has NO confident alignment
+    (Task 6: argmax on a candidate-set boundary or a flat similarity
+    surface) — callers must fail closed instead of resampling with an
+    untrusted scale.
 
     `prior_scale` (Stage 1.5, preprocessing.estimate_gsd_scale_prior): when
     given, the search is narrowed to a tight geomspace band of
