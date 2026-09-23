@@ -1,7 +1,7 @@
 # Task List — LUNA-IRiS Pipeline Repair (scope-locked: no matcher changes)
 
 ## Phase 0 — Truthful execution
-- [ ] Task 1: API accepts crop windows + size-guard fallback
+- [x] Task 1: API accepts crop windows + size-guard fallback (complete: 923bcad, 3 tests)
   - AC: `POST /api/register` accepts `source_window`/`reference_window`; guard at `pipeline.py:221-228` either receives a window or auto-tiles to ≤4 MP with a logged warning
   - Verify: Run 0 scenario (full 16 MP reference, no window) no longer crashes
   - Files: `backend/app.py:95-100`, `backend/lunar_registration/pipeline.py:221-228`

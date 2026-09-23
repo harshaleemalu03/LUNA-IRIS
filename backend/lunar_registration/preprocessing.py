@@ -26,6 +26,8 @@ ACTUAL image input, not merely as an angle source.
 
 from __future__ import annotations
 
+import logging
+import math
 import os
 import re
 import warnings
@@ -35,6 +37,20 @@ from typing import Optional, Tuple
 import numpy as np
 
 from .config import SensorConfig, get_sensor_config
+
+logger = logging.getLogger(__name__)
+
+# Mean lunar radius (m), PDS/IAU convention — turns degree tiepoints into a
+# meter-scale GSD when no projected CRS accompanies the image.
+R_MOON_M = 1_737_400.0
+
+# Illumination angle tags the sidecar XML may carry; named in "missing"
+# logs so a placeholder fallback never happens silently.
+SIDECAR_ANGLE_TAGS = (
+    "Solar_incidence_angle_in_degree",
+    "Sun_elevation_in_degree",
+    "Sun_azimuth_in_degree",
+)
 
 
 # ----------------------------------------------------------------------
@@ -75,6 +91,173 @@ class LoadedImage:
 
     geotransform: Optional[tuple] = None
     crs: Optional[object] = None
+
+    # Scalar georeferencing + sidecar XML metadata (Task 2). None = the field
+    # was absent in the file set; load time logs WHICH field, so downstream
+    # placeholder defaults (scale prior 0.5, routing incidence 30) are traceable.
+    pixel_scale_m: Optional[Tuple[float, float]] = None
+    corner_tiepoints: Optional[list] = None
+    sidecar_path: Optional[str] = None
+    sidecar_incidence_deg: Optional[float] = None
+    sidecar_sun_elevation_deg: Optional[float] = None
+    sidecar_sun_azimuth_deg: Optional[float] = None
+
+
+# ----------------------------------------------------------------------
+# Metadata reader (georeferencing tags + sidecar XML)
+# ----------------------------------------------------------------------
+
+def resolve_sidecar_xml(path: str) -> Optional[str]:
+    """Find the product sidecar XML for an image.
+
+    One XML exists per product and is shared by its source+reference rasters
+    (PROD_source_at_5m.tif / PROD_reference_at_5m.tif -> PROD.xml).
+    """
+    directory, stem = os.path.split(path)
+    stem = os.path.splitext(stem)[0]
+    base = re.sub(r"_(source|reference).*$", "", stem)
+    for candidate in (os.path.join(directory, base + ".xml"),
+                      os.path.join(directory, stem + ".xml")):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def read_sidecar_angles(xml_path: str) -> dict:
+    """Return {tag: float} for every illumination angle tag present in the XML."""
+    import xml.etree.ElementTree as ET
+
+    tree = ET.parse(xml_path)
+    angles: dict = {}
+    for tag in SIDECAR_ANGLE_TAGS:
+        el = tree.find(f".//{tag}")
+        if el is not None and el.text:
+            try:
+                angles[tag] = float(el.text)
+            except ValueError:
+                logger.warning("metadata: sidecar %s has non-numeric %s=%r",
+                               xml_path, tag, el.text)
+    return angles
+
+
+def _geodesic_distance_m(x1: float, y1: float, x2: float, y2: float,
+                         geographic: bool) -> float:
+    """Great-circle (haversine) distance on the sphere for degree tiepoints,
+    plain Euclidean otherwise. Haversine because the cos-formula catastrophically
+    cancels for the short (~km) edges inside one image footprint."""
+    if not geographic:
+        return math.hypot(x2 - x1, y2 - y1)
+    lon1, lat1, lon2, lat2 = map(math.radians, (x1, y1, x2, y2))
+    dlon, dlat = lon2 - lon1, lat2 - lat1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    return 2.0 * R_MOON_M * math.asin(min(1.0, math.sqrt(a)))
+
+
+def _gsd_from_tiepoints(gcps, shape) -> Optional[float]:
+    """Meter-per-pixel from corner tiepoints.
+
+    The footprint may be ROTATED in lon/lat space (real OHRC source: lon
+    changes along rows as well), so per-axis pitch must use the GCP edge that
+    varies in that pixel axis only — never axis-aligned bounding spans.
+    """
+    if len(gcps) < 2:
+        return None
+    geographic = (all(abs(g.x) <= 180.0 for g in gcps)
+                  and all(abs(g.y) <= 90.0 for g in gcps))
+
+    def _edge(axis: str) -> Optional[float]:
+        """Distance/px along 'row' (same col) or 'col' (same row) edges."""
+        best = None
+        for i, g1 in enumerate(gcps):
+            for g2 in gcps[i + 1:]:
+                if axis == "row":
+                    d_px = abs(g2.row - g1.row)
+                    same_line = g2.col == g1.col
+                else:
+                    d_px = abs(g2.col - g1.col)
+                    same_line = g2.row == g1.row
+                if same_line and d_px > 0:
+                    dist = _geodesic_distance_m(g1.x, g1.y, g2.x, g2.y, geographic)
+                    best = dist / d_px if best is None else min(best, dist / d_px)
+        return best
+
+    gsd_row = _edge("row")
+    gsd_col = _edge("col")
+    if gsd_row is None or gsd_col is None:
+        return None
+    return float((gsd_row + gsd_col) / 2.0)
+
+
+def _pixel_scale_from_georef(georef: dict) -> Optional[Tuple[float, float]]:
+    """(x_res, y_res) in CRS units for a projected, north-up raster."""
+    crs = georef.get("crs")
+    transform = georef.get("transform")
+    if crs is None or transform is None:
+        return None
+    if getattr(crs, "is_geographic", False):
+        return None
+    a, b, _, d, e, _ = transform[:6]
+    if b or d:
+        logger.warning("metadata: rotated geotransform (b=%s d=%s); "
+                       "pixel scale not axis-aligned, treating as missing", b, d)
+        return None
+    res = georef.get("res")
+    x_res, y_res = (abs(float(res[0])), abs(float(res[1]))) if res else (abs(float(a)), abs(float(e)))
+    return (x_res, y_res)
+
+
+def attach_file_metadata(loaded: LoadedImage, georef: Optional[dict] = None) -> LoadedImage:
+    """Populate georeferencing + sidecar XML scalars on a freshly loaded image.
+
+    Every absent field is logged BY NAME: the pipeline's placeholder defaults
+    (scale prior 0.5, routing incidence 30°) must always be traceable to a
+    specific missing input, never silent.
+    """
+    georef = georef or {}
+    gcps = georef.get("gcps") or []
+
+    if gcps:
+        loaded.corner_tiepoints = [(g.row, g.col, g.x, g.y) for g in gcps]
+        loaded.gsd_m = _gsd_from_tiepoints(gcps, loaded.data.shape)
+        if loaded.gsd_m is None:
+            logger.warning("metadata: %s has corner tiepoints but GSD could "
+                           "not be derived (degenerate spans)", loaded.path)
+    else:
+        pixel_scale = _pixel_scale_from_georef(georef) if georef else None
+        if pixel_scale is not None:
+            loaded.pixel_scale_m = pixel_scale
+            loaded.gsd_m = float(sum(pixel_scale) / 2.0)
+
+    if loaded.gsd_m is None:
+        logger.warning(
+            "metadata: %s missing georeferencing (no projected pixel scale "
+            "and no corner tiepoints) — GSD scale prior falls back to default",
+            loaded.path,
+        )
+
+    xml_path = resolve_sidecar_xml(loaded.path)
+    if xml_path is None:
+        logger.warning(
+            "metadata: %s missing sidecar XML (expected a product .xml next "
+            "to the image with tags: %s) — illumination angles unavailable",
+            loaded.path, ", ".join(SIDECAR_ANGLE_TAGS),
+        )
+        return loaded
+
+    loaded.sidecar_path = xml_path
+    angles = read_sidecar_angles(xml_path)
+    field_by_tag = {
+        "Solar_incidence_angle_in_degree": "sidecar_incidence_deg",
+        "Sun_elevation_in_degree": "sidecar_sun_elevation_deg",
+        "Sun_azimuth_in_degree": "sidecar_sun_azimuth_deg",
+    }
+    for tag, field in field_by_tag.items():
+        if tag in angles:
+            setattr(loaded, field, angles[tag])
+        else:
+            logger.warning("metadata: %s missing sidecar tag %s in %s",
+                           loaded.path, tag, xml_path)
+    return loaded
 
 
 # ----------------------------------------------------------------------
@@ -944,6 +1127,7 @@ def load_image(
 
     geotransform = None
     crs = None
+    georef: Optional[dict] = None
 
     # ==============================================================
     # NAC_PHO DIRECT MODE
@@ -986,6 +1170,8 @@ def load_image(
         # If another NAC_PHO path was explicitly supplied, let it
         # override the angle source.
         # ----------------------------------------------------------
+
+        attach_file_metadata(loaded, None)
 
         if nac_pho_path is not None:
 
@@ -1040,6 +1226,12 @@ def load_image(
 
             geotransform = ds.transform
             crs = ds.crs
+            georef = {
+                "transform": ds.transform,
+                "crs": ds.crs,
+                "res": ds.res,
+                "gcps": ds.gcps[0],
+            }
 
     elif (
         ext in (".tif", ".tiff", ".png", ".jpg", ".jpeg")
@@ -1085,6 +1277,8 @@ def load_image(
         geotransform=geotransform,
         crs=crs,
     )
+
+    attach_file_metadata(loaded, georef)
 
     # ==============================================================
     # Attach angle source
