@@ -11,7 +11,7 @@
   - Verify: canonical pair reports GSD ratio ≈ 1.006 and incidence ≈ 84.896724
   - Files: `backend/lunar_registration/preprocessing.py` (new reader near l.369 patterns)
   - Deps: none | Scope: M
-- [ ] Task 3: Wire metadata → scale prior, routing incidence, sensor conditioning
+- [x] Task 3: Wire metadata → scale prior, routing incidence, sensor conditioning
   - AC: `estimate_gsd_scale_prior` receives computed ratio (prior band [0.855, 1.157] contains truth); routing receives XML/manual incidence so canonical pair resolves `hybrid_pwift_roma2` / `polar_grazing` with no CLI flags; placeholder defaults (`scale.py` 0.5, `pipeline.py:95` 30.0) only used when Task 2 logged a missing field
   - Verify: Run 1 (no flags) now matches Run 2's regime/reason; Run exp-C behavior (chosen scale inside correct band) reproduced automatically
   - Files: `backend/lunar_registration/scale.py:1858`, `backend/lunar_registration/pipeline.py:244-257`

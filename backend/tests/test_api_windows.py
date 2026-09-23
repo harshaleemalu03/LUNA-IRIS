@@ -30,7 +30,12 @@ def _client_and_capture(monkeypatch):
         out = Path(kwargs["out_dir"])
         stem = Path(kwargs["source_path"]).stem
         (out / f"{stem}_matches.png").write_bytes(b"png")
-        return {"ok": True}
+        return {
+            "passed": True,
+            "failure_reason": None,
+            "subpixel_refine": {"low_precision": False},
+            "orthogonal_gate": {"passed": True},
+        }
 
     monkeypatch.setattr(api_app, "run_pipeline", fake_run_pipeline)
     return TestClient(api_app.app), captured

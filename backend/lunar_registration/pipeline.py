@@ -197,6 +197,10 @@ def run_pipeline(
 ) -> dict:
     cfg = cfg or PipelineConfig()
 
+    # Own the output directory from the start: failure runs never reach
+    # write_outputs, but summary.json must still land somewhere.
+    os.makedirs(out_dir, exist_ok=True)
+
     if eloftr_ckpt:
         eloftr_checkpoint = eloftr_ckpt
     if roma2_weights:
@@ -543,48 +547,73 @@ def run_pipeline(
             tau_agree=cfg.orthogonal_gate_tau_agree,
             k_sigma=cfg.orthogonal_gate_k_sigma,
         )
-        if not ortho_eval.get("pass", False):
-            warnings.warn(
-                f"Orthogonal verification gate flagged winning transform: {ortho_eval.get('reason')}. "
-                "Proceeding with flagged confidence."
-            )
 
-    # ---- Stage 5: MiHo Piecewise Geometry + 6x6 Gridded GCP Optimizer (§2) ----
-    miho_out = miho_plus_gcp(primary_H, best["match_result"], grid_size=cfg.miho_grid_size, target_gcps=cfg.miho_target_gcps)
+    # Fail-closed verdict (Task 4): no valid transform, or a gate FAIL, is a
+    # failed registration — never a "flagged confidence" success. Products are
+    # withheld; summary.json still records why (the demo keys off exit codes).
+    failure_reason = None
+    if primary_H is None:
+        failure_reason = (
+            f"no_transform: matcher '{resolved_matcher}' produced no "
+            "geometrically valid transform"
+        )
+    elif ortho_eval is not None and not ortho_eval.get("pass", False):
+        failure_reason = f"verification_gate_failed: {ortho_eval.get('reason')}"
 
-    if not isinstance(best["hom_result"], list):
-        best["hom_result"].Hs_local = miho_out.get("Hs_local")
-        best["hom_result"].gcps = miho_out.get("gcps")
+    if failure_reason is None:
+        # ---- Stage 5: MiHo Piecewise Geometry + 6x6 Gridded GCP Optimizer (§2) ----
+        miho_out = miho_plus_gcp(primary_H, best["match_result"], grid_size=cfg.miho_grid_size, target_gcps=cfg.miho_target_gcps)
 
-    # ---- Stage 5.5: Cause-Branched Subpixel Refinement (§5) ----
-    src_inc_mean = float(np.nanmean(src_incidence_scaled)) if src_incidence_scaled is not None else 0.0
-    ref_inc_mean = float(np.nanmean(ref_incidence)) if ref_incidence is not None else 0.0
-    illum_delta_deg = abs(src_inc_mean - ref_inc_mean)
-    subpixel_refine_out = refine_tile(src_scaled, ref.data, illum_delta_deg=illum_delta_deg)
+        if not isinstance(best["hom_result"], list):
+            best["hom_result"].Hs_local = miho_out.get("Hs_local")
+            best["hom_result"].gcps = miho_out.get("gcps")
 
-    # ---- Stage 6: georeferencing and output ----
-    registered = register_image(src_scaled, ref.data.shape, best["hom_result"])
-    outputs = write_outputs(
-        out_dir, tag=os.path.splitext(os.path.basename(source_path))[0],
-        registered_img=registered,
-        pts_src=best["match_result"].pts_src, pts_dst=best["match_result"].pts_dst,
-        inlier_mask=best["inlier_mask"], method=best_method,
-        ref_geotransform=ref.geotransform, ref_crs=ref.crs,
-        src_img=src_scaled, ref_img=ref.data,
-        gcps=miho_out.get("gcps", []),
-        export_gcl_gcps_csv=cfg.export_gcl_gcps_csv,
-    )
+        # ---- Stage 5.5: Cause-Branched Subpixel Refinement (§5) ----
+        src_inc_mean = float(np.nanmean(src_incidence_scaled)) if src_incidence_scaled is not None else 0.0
+        ref_inc_mean = float(np.nanmean(ref_incidence)) if ref_incidence is not None else 0.0
+        illum_delta_deg = abs(src_inc_mean - ref_inc_mean)
+        subpixel_refine_out = refine_tile(src_scaled, ref.data, illum_delta_deg=illum_delta_deg)
+
+        # ---- Stage 6: georeferencing and output ----
+        registered = register_image(src_scaled, ref.data.shape, best["hom_result"])
+        outputs = write_outputs(
+            out_dir, tag=os.path.splitext(os.path.basename(source_path))[0],
+            registered_img=registered,
+            pts_src=best["match_result"].pts_src, pts_dst=best["match_result"].pts_dst,
+            inlier_mask=best["inlier_mask"], method=best_method,
+            ref_geotransform=ref.geotransform, ref_crs=ref.crs,
+            src_img=src_scaled, ref_img=ref.data,
+            gcps=miho_out.get("gcps", []),
+            export_gcl_gcps_csv=cfg.export_gcl_gcps_csv,
+        )
+    else:
+        logger.warning(
+            "fail-closed: %s — withholding MiHo/GCP/refine stages and all "
+            "registered output products (summary.json only)",
+            failure_reason,
+        )
+        miho_out = {"gcps": [], "coverage": 0.0, "Hs_local": None}
+        subpixel_refine_out = {
+            "method": None, "dx": None, "dy": None, "low_precision": True,
+            "reason": f"skipped: {failure_reason}",
+        }
+        outputs = {}
 
     summary = {
         "source": source_path, "reference": reference_path,
+        "passed": failure_reason is None,
+        "failure_reason": failure_reason,
         "sensor": src.sensor.name, "matcher": matcher, "resolved_matcher": resolved_matcher,
         "best_method": best_method,
         "condition_routing": routing_info,
         "contingency_fallback": contingency_fallback,
         "orthogonal_gate": {
             "enabled": cfg.enable_orthogonal_gate,
-            "passed": ortho_eval.get("pass", False) if ortho_eval is not None else True,
-            "reason": ortho_eval.get("reason", "disabled") if ortho_eval is not None else "disabled",
+            "passed": (ortho_eval.get("pass", False) if ortho_eval is not None
+                       else primary_H is not None),
+            "reason": (ortho_eval.get("reason") if ortho_eval is not None
+                       else ("disabled" if not cfg.enable_orthogonal_gate
+                             else "skipped: no transform")),
             "cost_ms": ortho_eval.get("cost_ms", 0.0) if ortho_eval is not None else 0.0,
             "struct_ncc": ortho_eval.get("struct_ncc", 0.0) if ortho_eval is not None else 0.0,
         },
@@ -714,6 +743,11 @@ def main():
         fuse_pwift_eloftr=args.fuse_pwift_eloftr,
     )
     print(json.dumps(summary, indent=2))
+
+    if not summary.get("passed", False):
+        # Fail-closed contract: a registration that failed verification must
+        # exit nonzero so demo scripts/CI never key off a green exit alone.
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

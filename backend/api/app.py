@@ -171,6 +171,26 @@ async def register(
             use_eloftr=True,
         )
 
+        # Fail-closed: a run that failed verification is a structured client
+        # error (422), never a 200 "success". Raised before the generic
+        # handler below, which re-raises HTTPExceptions untouched.
+        if not summary.get("passed", False):
+            print("=" * 60)
+            print("LUNA-TICS REGISTRATION FAILED VERIFICATION")
+            print(f"Reason: {summary.get('failure_reason')}")
+            print("=" * 60)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "passed": False,
+                    "run_id": run_id,
+                    "failure_reason": summary.get("failure_reason"),
+                    "low_precision": summary.get("subpixel_refine", {}).get("low_precision"),
+                    "orthogonal_gate": summary.get("orthogonal_gate"),
+                    "summary_path": f"/outputs/{run_id}/summary.json",
+                },
+            )
+
         print("=" * 60)
         print("LUNA-TICS REGISTRATION COMPLETE")
         print("=" * 60)
@@ -191,8 +211,16 @@ async def register(
             "success": True,
             "run_id": run_id,
             "status": "success",
-            "output_image": f"/outputs/{run_id}/{matches_filename}"
+            "output_image": f"/outputs/{run_id}/{matches_filename}",
+            "passed": True,
+            "failure_reason": None,
+            "low_precision": summary.get("subpixel_refine", {}).get("low_precision", False),
+            "orthogonal_gate_passed": summary.get("orthogonal_gate", {}).get("passed"),
         }
+
+    except HTTPException:
+        # Keep 422 (fail-closed) / window-parse errors intact.
+        raise
 
     except Exception as e:
 
