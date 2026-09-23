@@ -32,7 +32,7 @@ import os
 import re
 import warnings
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -1993,6 +1993,249 @@ def attach_lroc_fetched_angles(
         )
 
     return loaded
+
+
+# ----------------------------------------------------------------------
+# Tiepoint-derived coarse transform (Stage 1.6, Task 12)
+# ----------------------------------------------------------------------
+
+# Assumed source CRS for eval-set rasters that carry lon/lat GCPs but no
+# declared CRS (rasterio reports crs=None): lunar lon/lat on the 1737.4 km
+# sphere. The reference's declared CRS anchors the composition; a wrong
+# assumption yields a seed the matcher's inlier support rejects — the seed
+# is evidence, never authority.
+ASSUMED_MOON_LONGLAT_CRS = "+proj=longlat +R=1737400 +no_defs"
+
+# Magnitude fallback for crs-less mappings: lunar geographic coordinates
+# stay within +/-360 longitude (the eval data mixes -180..180 and 0..360
+# conventions) and +/-90 latitude; projected moon grids (polar
+# stereographic metres) run to tens of thousands. A wrong read composes
+# mixed frames into an absurd seed that fails inlier support downstream.
+_GEOGRAPHIC_X_MAX = 360.0
+_GEOGRAPHIC_Y_MAX = 90.0
+
+# rasterio returns this when a dataset has no geotransform at all; an
+# identity affine maps pixel to pixel and carries no georeferencing.
+_IDENTITY_TRANSFORM = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+
+
+def _mapping_from_image(
+    image: "LoadedImage", offset: Tuple[int, int],
+) -> Tuple[Optional[np.ndarray], list, list, str]:
+    """Resolve one image's pixel->frame mapping.
+
+    Returns (A, sample_px, sample_xy, status). Prefers corner tiepoints
+    (the label's explicit control points); falls back to the raster's own
+    geotransform shifted into the crop frame — eval-set references carry a
+    real transform but zero GCPs, sources the reverse. status is "ok" /
+    "missing" / "degenerate"; the caller renders it into a reason with
+    side + path so refusals stay traceable.
+    """
+    col_off, row_off = offset
+    pts = image.corner_tiepoints
+    if pts and len(pts) >= 3:
+        sample_px = [(p[1] - col_off, p[0] - row_off) for p in pts]
+        sample_xy = [(p[2], p[3]) for p in pts]
+        uv1 = np.array([[u, v, 1.0] for u, v in sample_px], dtype=np.float64)
+        if np.linalg.matrix_rank(uv1) < 3:
+            return None, sample_px, sample_xy, "degenerate"
+        fit, *_ = np.linalg.lstsq(uv1, np.asarray(sample_xy), rcond=None)
+        A = np.array([
+            [fit[0, 0], fit[1, 0], fit[2, 0]],
+            [fit[0, 1], fit[1, 1], fit[2, 1]],
+            [0.0, 0.0, 1.0],
+        ])
+        return A, sample_px, sample_xy, "ok"
+
+    gt = image.geotransform
+    if gt is not None:
+        a, b, c, d, e, f = (float(v) for v in tuple(gt)[:6])
+        if (a, b, c, d, e, f) != _IDENTITY_TRANSFORM:
+            # Full-raster x = a*col + b*row + c with col = u + x0, row =
+            # v + y0 in the crop frame -> shift the origin, exact like the
+            # tiepoint path (load_image slices at window=(x, y, w, h)).
+            A = np.array([
+                [a, b, c + a * col_off + b * row_off],
+                [d, e, f + d * col_off + e * row_off],
+                [0.0, 0.0, 1.0],
+            ])
+            h, w = image.data.shape[:2]
+            sample_px = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]
+            sample_xy = [
+                (A[0, 0] * u + A[0, 1] * v + A[0, 2],
+                 A[1, 0] * u + A[1, 1] * v + A[1, 2])
+                for u, v in sample_px
+            ]
+            return A, sample_px, sample_xy, "ok"
+    return None, [], [], "missing"
+
+
+def _frame_class(sample_xy: list, crs: Optional[object]) -> str:
+    """\"geographic\" or \"projected\" for one side's map frame. A declared
+    CRS wins; otherwise the coordinate magnitudes decide (see
+    _GEOGRAPHIC_* — a heuristic whose mistakes become seeds the matcher's
+    inlier support rejects, never trusted guesses)."""
+    if crs is not None:
+        return "geographic" if getattr(crs, "is_geographic", False) else "projected"
+    xs = [abs(p[0]) for p in sample_xy]
+    ys = [abs(p[1]) for p in sample_xy]
+    if max(xs) <= _GEOGRAPHIC_X_MAX and max(ys) <= _GEOGRAPHIC_Y_MAX:
+        return "geographic"
+    return "projected"
+
+
+def _reproject_and_compose(
+    mappings: Dict[str, tuple],
+    src_frame: str,
+    ref_frame: str,
+    result: Dict[str, Any],
+) -> Optional[np.ndarray]:
+    """Compose H after reprojecting the geographic side's frame
+    coordinates into the projected side's declared CRS (the eval set's
+    real situation: lon/lat GCPs without CRS vs Polar Stereographic
+    metres with one — Phase 0's \"tiepoint warp ~0\" root cause).
+
+    On refusal: fills result['reason'] and returns None — a frame we
+    cannot reconcile must be reported, never composed into a confident
+    lie. The reprojected seed is still only a hypothesis: the estimator
+    judges it on matcher inliers like any other."""
+    if not _HAS_RASTERIO:
+        result["reason"] = "cannot reproject: frames differ but rasterio is unavailable"
+        return None
+    from rasterio.crs import CRS
+    from rasterio.warp import transform as warp_transform
+
+    g_side = "source" if src_frame == "geographic" else "reference"
+    p_side = "reference" if g_side == "source" else "source"
+    g_A, g_px, g_xy, g_img = mappings[g_side]
+    p_A, _, _, p_img = mappings[p_side]
+
+    if p_img.crs is None:
+        result["reason"] = (
+            f"cannot reproject: frames differ (source {src_frame} vs "
+            f"reference {ref_frame}) and the projected side ({p_side} "
+            f"'{p_img.path}') declares no CRS"
+        )
+        return None
+
+    if g_img.crs is not None:
+        g_crs = g_img.crs
+    else:
+        g_crs = CRS.from_string(ASSUMED_MOON_LONGLAT_CRS)
+        logger.warning(
+            "tiepoint seed: %s '%s' has geographic coordinates but no "
+            "declared CRS; assuming %s",
+            g_side, g_img.path, ASSUMED_MOON_LONGLAT_CRS,
+        )
+
+    try:
+        xs_w, ys_w = warp_transform(
+            g_crs, p_img.crs, [p[0] for p in g_xy], [p[1] for p in g_xy])
+    except Exception as exc:  # PROJ/network/CRS errors -> honest refusal
+        result["reason"] = (
+            f"cannot reproject {g_side} into the projected frame "
+            f"({type(exc).__name__}: {exc})"
+        )
+        return None
+
+    # Refit the geographic side's pixels against its reprojected frame
+    # coordinates, then compose in the projected frame (units cancel there).
+    uv1 = np.array([[u, v, 1.0] for u, v in g_px], dtype=np.float64)
+    fit, *_ = np.linalg.lstsq(uv1, np.column_stack([xs_w, ys_w]), rcond=None)
+    A_g_in_p = np.array([
+        [fit[0, 0], fit[1, 0], fit[2, 0]],
+        [fit[0, 1], fit[1, 1], fit[2, 1]],
+        [0.0, 0.0, 1.0],
+    ])
+    A_src_p, A_ref_p = ((A_g_in_p, p_A) if g_side == "source"
+                        else (p_A, A_g_in_p))
+    try:
+        return np.linalg.inv(A_ref_p) @ A_src_p
+    except np.linalg.LinAlgError:
+        result["reason"] = "singular pixel->map fit after reprojection"
+        return None
+
+
+def derive_tiepoint_coarse_transform(
+    src: "LoadedImage",
+    ref: "LoadedImage",
+    src_offset: Tuple[int, int] = (0, 0),
+    ref_offset: Tuple[int, int] = (0, 0),
+) -> Dict[str, Any]:
+    """Coarse source-pixel -> reference-pixel affine from each raster's own
+    georeferencing (corner tiepoints, or geotransform) — metadata only.
+
+    WHY: the homography estimator only runs once a matcher produced >= 4
+    correspondences, and its RANSAC fit starts from nothing — on weak-texture
+    pairs that fit comes out unsupported ("no_transform") even though both
+    labels pin the raster corners to map coordinates. The composition
+    gives the coarse transform for free; the estimator judges it on
+    evidence like any other hypothesis (viewpoint._evaluate_seed_hypothesis),
+    so bad metadata loses instead of being believed.
+
+    FRAMES: same numeric frame on both sides (declared CRS, else
+    coordinate magnitudes) -> direct composition; frames differ -> the
+    geographic side is reprojected into the projected side's CRS first
+    (_reproject_and_compose), refused with a reason when that is
+    impossible. `src_offset`/`ref_offset` are the (x, y) pixel origin of
+    the crop applied to each load (window or auto-tile; (0, 0) = full
+    frame) — full-raster tiepoints/transforms are SHIFTED by this known
+    origin, exact arithmetic, so windowed and tiled runs still derive.
+
+    Returns {"H": (3, 3) ndarray | None, "rotation_deg": float | None,
+    "scale": float | None, "reason": str | None}. On refusal H is None and
+    `reason` names the exact cause so the placeholder downstream stays
+    traceable, never silent.
+    """
+    result: Dict[str, Any] = {
+        "H": None, "rotation_deg": None, "scale": None, "reason": None,
+    }
+
+    mappings: Dict[str, tuple] = {}
+    for side, image, offset in (
+        ("source", src, src_offset),
+        ("reference", ref, ref_offset),
+    ):
+        A, sample_px, sample_xy, status = _mapping_from_image(image, offset)
+        if status == "missing":
+            result["reason"] = (
+                f"missing or insufficient corner tiepoints and no usable "
+                f"geotransform on {side} ('{image.path}', got "
+                f"{len(image.corner_tiepoints or [])} tiepoints)"
+            )
+            return result
+        if status == "degenerate":
+            result["reason"] = (
+                f"degenerate (collinear) tiepoints on {side} ('{image.path}')"
+            )
+            return result
+        mappings[side] = (A, sample_px, sample_xy, image)
+
+    src_A, _, src_xy, src_img = mappings["source"]
+    ref_A, _, ref_xy, ref_img = mappings["reference"]
+    src_frame = _frame_class(src_xy, src_img.crs)
+    ref_frame = _frame_class(ref_xy, ref_img.crs)
+
+    if src_frame == ref_frame:
+        # Same numeric frame: units cancel in inv(A_ref) @ A_src.
+        try:
+            H = np.linalg.inv(ref_A) @ src_A
+        except np.linalg.LinAlgError:  # rank-checked above; defensive anyway
+            result["reason"] = (
+                f"singular pixel->map fit on reference ('{ref.path}')"
+            )
+            return result
+    else:
+        H = _reproject_and_compose(mappings, src_frame, ref_frame, result)
+        if H is None:
+            return result
+
+    result["H"] = H
+    result["scale"] = float(np.sqrt(abs(float(np.linalg.det(H[:2, :2])))))
+    # Orientation of the source x-axis in reference pixels (0 for two
+    # north-up rasters sharing a grid — a diagnostic, not a full decomposition.
+    result["rotation_deg"] = float(np.degrees(np.arctan2(H[1, 0], H[0, 0])))
+    return result
 
 
 # ----------------------------------------------------------------------

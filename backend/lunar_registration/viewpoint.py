@@ -46,6 +46,10 @@ class HomographyResult:
     block: Optional[Tuple[int, int, int, int]] = None  # (x, y, w, h) if local
     Hs_local: Optional[dict] = None   # MiHo quadrant homographies {quad_0: H, ...}
     gcps: Optional[list] = None       # gridded ground control points
+    # "fitted" for RANSAC/FSC results, "tiepoint_seed" for the Task 12
+    # metadata hypothesis — lets downstream tell WHERE a hypothesis came
+    # from (default keeps every existing construction unchanged).
+    provenance: str = "fitted"
 
 
 def estimate_global_homography(
@@ -94,6 +98,55 @@ def _homography_is_stable(H: np.ndarray, n_inliers: int, min_inliers: int,
     if scale_ratio > max_scale_factor or singular_values.max() > max_scale_factor:
         return False
     return True
+
+
+# A metadata-seeded hypothesis must clear the same minimum inlier support
+# as a fitted global homography (estimate_global_homography's default):
+# metadata is a candidate, not authority.
+SEED_MIN_INLIERS = 8
+
+
+def _evaluate_seed_hypothesis(
+    H: Optional[np.ndarray],
+    pts_src: np.ndarray,
+    pts_dst: np.ndarray,
+    reproj_threshold: float,
+    tau_e: Optional[float] = None,
+) -> Optional[HomographyResult]:
+    """Judge a metadata-seeded affine by the SAME evidence as a fitted one:
+    reprojection inliers at the RANSAC threshold, stability, then the
+    Eq 26-27 cleanup. Returns None when unsupported — bad/stale metadata
+    must lose on evidence, never be trusted because it came from a label."""
+    if H is None or pts_src is None or len(pts_src) < SEED_MIN_INLIERS:
+        return None
+    mask = reprojection_cleanup(pts_src, pts_dst, H, tau_e=reproj_threshold)
+    if not _homography_is_stable(H, int(mask.sum()), SEED_MIN_INLIERS):
+        return None
+    if tau_e is not None:
+        mask = mask & reprojection_cleanup(pts_src, pts_dst, H, tau_e=tau_e)
+    if not mask.any():
+        return None
+    return HomographyResult(H=H, inlier_mask=mask, provenance="tiepoint_seed")
+
+
+def insert_seed_hypothesis(
+    results: List[HomographyResult],
+    seed: Optional[HomographyResult],
+) -> List[HomographyResult]:
+    """Place the supported seed among the estimator's results.
+
+    ORDERING WHY: run_pipeline reads primary_H from results[0].H — a fitted
+    homography that exists must stay first (the seed never shadows a real
+    fit); only when the fitted hypothesis FAILED (H=None) does the seed go
+    first, turning "no transform" into a metadata hypothesis the
+    orthogonal gate can still judge. seed=None is a passthrough."""
+    if seed is None:
+        return results
+    if not results:
+        return [seed]
+    if results[0].H is None:
+        return [seed] + results
+    return results + [seed]
 
 
 def estimate_local_homographies(
@@ -193,18 +246,41 @@ def estimate_local_homographies(
 def estimate_viewpoint_transform(
     pts_src: np.ndarray, pts_dst: np.ndarray, sensor: SensorConfig,
     image_shape: Tuple[int, int], cfg,
+    seed_H: Optional[np.ndarray] = None,
 ):
     """Dispatch based on `sensor.homography_mode`. Returns either a single
     HomographyResult (global) or a List[HomographyResult] (local, one per
-    block)."""
+    block).
+
+    seed_H (Task 12): optional metadata-derived affine (corner tiepoints).
+    It is evaluated on the matches and appended ONLY when it has the same
+    inlier support a fitted hypothesis would need; with seed_H=None (the
+    default) the return is byte-for-byte the old behavior."""
     if sensor.homography_mode == "global":
-        return estimate_global_homography(
+        base = estimate_global_homography(
             pts_src, pts_dst, cfg.ransac_reproj_threshold_px, cfg.ransac_max_iters, cfg.ransac_confidence,
             reprojection_cleanup_tau_e=cfg.reprojection_cleanup_tau_e_px)
-    if sensor.homography_mode == "local":
-        return estimate_local_homographies(
+    elif sensor.homography_mode == "local":
+        base = estimate_local_homographies(
             pts_src, pts_dst, image_shape,
             reproj_threshold=cfg.ransac_reproj_threshold_px,
             reprojection_cleanup_tau_e=cfg.reprojection_cleanup_tau_e_px,
             max_iters=cfg.ransac_max_iters, confidence=cfg.ransac_confidence)
-    raise ValueError(f"Unknown homography_mode: {sensor.homography_mode}")
+    else:
+        raise ValueError(f"Unknown homography_mode: {sensor.homography_mode}")
+
+    if seed_H is None:
+        return base
+    seed = _evaluate_seed_hypothesis(
+        seed_H, pts_src, pts_dst,
+        reproj_threshold=cfg.ransac_reproj_threshold_px,
+        tau_e=cfg.reprojection_cleanup_tau_e_px)
+    if seed is None:
+        warnings.warn(
+            "tiepoint seed rejected: not supported by the matcher's "
+            f"correspondences (< {SEED_MIN_INLIERS} stable reprojection "
+            "inliers); continuing with fitted hypotheses only."
+        )
+        return base
+    as_list = base if isinstance(base, list) else [base]
+    return insert_seed_hypothesis(as_list, seed)

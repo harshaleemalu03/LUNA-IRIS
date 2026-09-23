@@ -51,7 +51,10 @@ import numpy as np
 import cv2
 
 from .config import PipelineConfig, get_sensor_config
-from .preprocessing import load_image, load_angle_maps, LoadedImage, estimate_gsd_scale_prior
+from .preprocessing import (
+    load_image, load_angle_maps, LoadedImage, estimate_gsd_scale_prior,
+    derive_tiepoint_coarse_transform,
+)
 from .illumination import apply_illumination_correction
 from .scale import select_best_scale, apply_scale, apply_rotation
 from .matching import get_matcher, run_pwift_matching, MatchResult, BaseMatcher
@@ -281,13 +284,20 @@ def run_pipeline(
     # Size guard: an image with no crop window is auto-center-tiled to
     # MAX_SAFE_PIXELS with a loud warning; an image with an explicit window
     # (shared or per-image) is the caller's choice and proceeds as given.
+    # Pixel origin of the crop applied to each load (window or auto-tile);
+    # (0, 0) = full frame. Tiepoints stay full-raster coordinates, so the
+    # Task-12 seed derivation shifts them by exactly this origin.
+    _crop_offsets = {"source": (0, 0), "reference": (0, 0)}
     for _tag, _loaded, _img_window in (
         ("source", src, source_window),
         ("reference", ref, reference_window),
     ):
+        if _img_window is not None:
+            _crop_offsets[_tag] = (_img_window[0], _img_window[1])
         if _img_window is None and _loaded.data.size > MAX_SAFE_PIXELS:
             _h, _w = _loaded.data.shape[:2]
             _x0, _y0, _nw, _nh = _center_tile_window(_h, _w, MAX_SAFE_PIXELS)
+            _crop_offsets[_tag] = (_x0, _y0)
             logger.warning(
                 "auto-tile: %s image '%s' is %sx%s (%s px), above the %s px "
                 "safety limit and no crop window was given; center-tiling to "
@@ -304,6 +314,16 @@ def run_pipeline(
                 _arr = getattr(_loaded, _arr_name, None)
                 if isinstance(_arr, np.ndarray) and _arr.shape[:2] == (_h, _w):
                     setattr(_loaded, _arr_name, _arr[_rows, _cols])
+
+    # Task 12: metadata-derived coarse transform, wired as a candidate
+    # hypothesis for the homography estimator. Crop origins are exact
+    # (window=(x, y, w, h) / auto-tile slice), so full-raster tiepoints are
+    # SHIFTED rather than withheld — every demo run is windowed or tiled.
+    tiepoint_report = derive_tiepoint_coarse_transform(
+        src, ref,
+        src_offset=_crop_offsets["source"],
+        ref_offset=_crop_offsets["reference"],
+    )
 
     src_incidence, src_emission, src_phase = src.incidence_deg, src.emission_deg, src.phase_deg
     if source_incidence_path and source_emission_path:
@@ -500,6 +520,9 @@ def run_pipeline(
 
     results_by_method = {}
     competition_pool = []
+    # Task 12: did the metadata-seeded hypothesis survive estimation? Used
+    # by summary.tiepoint_coarse; provenance tagging comes from viewpoint.
+    tiepoint_seed_supported = False
 
     for match_result in results_to_evaluate:
         if match_result is None or len(match_result.pts_src) < 4:
@@ -509,8 +532,12 @@ def run_pipeline(
         hom_result = estimate_viewpoint_transform(
             match_result.pts_src, match_result.pts_dst, src.sensor,
             image_shape=src_scaled.shape, cfg=cfg,
+            seed_H=tiepoint_report["H"],
         )
         H_or_local_results = hom_result if isinstance(hom_result, list) else hom_result.H
+        _hypotheses = hom_result if isinstance(hom_result, list) else [hom_result]
+        if any(getattr(r, "provenance", "fitted") == "tiepoint_seed" for r in _hypotheses):
+            tiepoint_seed_supported = True
         inlier_mask = hom_result.inlier_mask if not isinstance(hom_result, list) else np.zeros(
             len(match_result.pts_src), dtype=bool)
         if isinstance(hom_result, list):
@@ -681,6 +708,16 @@ def run_pipeline(
         "sensor": src.sensor.name, "matcher": matcher, "resolved_matcher": resolved_matcher,
         "best_method": best_method,
         "condition_routing": routing_info,
+        "tiepoint_coarse": {
+            "derived": tiepoint_report["H"] is not None,
+            "rotation_deg": tiepoint_report["rotation_deg"],
+            "scale": tiepoint_report["scale"],
+            "reason": tiepoint_report["reason"],
+            # None = nothing was derived (nothing to support); True/False =
+            # derived and the matcher's correspondences did/didn't back it.
+            "seed_supported": (tiepoint_seed_supported
+                               if tiepoint_report["H"] is not None else None),
+        },
         "contingency_fallback": contingency_fallback,
         "orthogonal_gate": {
             "enabled": cfg.enable_orthogonal_gate,
