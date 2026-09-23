@@ -49,15 +49,15 @@
   - Verify: two different matchers on same pair → flag raised when phase-correlation peak weak or values identical
   - Files: `backend/lunar_registration/pipeline.py` (refine ~l.504) + summary builder
   - Deps: 4 (surfacing) | Scope: S
-- [ ] Task 9: Repair `diagnose.py`
+- [x] Task 9: Repair `diagnose.py`
   - AC: fixes `pwift_keypoint_threshold` (l.55), `PWIFTMaps.shape` (l.25), hardcoded `sensor_hint="LROC"` (l.60); supports **per-image** windows (shared window cannot express this pair); documented memory note (full-image OOM, exit 137)
   - Verify: `diagnose.py` runs windowed on canonical pair without crashing; prints correct sensor (OHRC)
   - Files: `backend/diagnose.py`
   - Deps: 2 (per-image windows helpers) | Scope: S
 
 ### Checkpoint: Phase 1
-- [ ] Phase 0 pair set re-run, no regressions
-- [ ] `diagnose.py` windowed run clean
+- [x] Phase 0 pair set re-run, no regressions — canonical CLI exit 1/`no_transform`, canonical API 422 structured + health 200 after, IIRS easy pair exit 1/`no_confident_alignment`; prior+routing intact on all (logs: `/tmp/opencode/iris_runs/phase1_cli.log`, `phase1_api_resp.json`, `phase1_easy.log`)
+- [x] `diagnose.py` windowed run clean — real IIRS pair, per-image windows 250×2000/300×2200, EXIT=0 through all stages + honest diagnosis (`/tmp/opencode/iris_runs/phase1_diagnose_windowed.log`)
 
 ## Phase 2 — Cleanup
 - [ ] Task 10: Wire or delete `resample_to_gsd` (`scale.py:1805`) — dead either way today

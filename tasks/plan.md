@@ -63,11 +63,11 @@ hybrid arms stay exactly as they are; every task is wiring, guard, or truth-tell
 - [ ] `pipeline.py` refine ~l.504 + summary — matcher-independent identical dx/dy detected as degenerate → low_precision:true with reason, surfaced in summary/API. Deps: Task 4
 
 ## Task 9: Repair diagnose.py
-- [ ] `diagnose.py` — fix pwift_keypoint_threshold (l.55), PWIFTMaps.shape (l.25), hardcoded sensor_hint="LROC" (l.60); support per-image windows; document full-image OOM. Deps: Task 2
+- [x] `diagnose.py` — fix pwift_keypoint_threshold (l.55), PWIFTMaps.shape (l.25), hardcoded sensor_hint="LROC" (l.60); support per-image windows; document full-image OOM. Deps: Task 2 — done (commit f701c4c; windowed run EXIT=0 on real IIRS pair)
 
 ### Checkpoint: Phase 1
-- [ ] Phase 0 pair set re-run, no regressions
-- [ ] `diagnose.py` windowed run clean
+- [x] Phase 0 pair set re-run, no regressions — canonical CLI exit=1 passed=false `no_transform` (was gate-362.9px; class moved by Task 5/7 arm changes, contract intact: prior=1.0066821 polar_grazing/hybrid_pwift_roma2 outputs={} summary-only), canonical API HTTP=422 structured (routing/prior/subpixel_refine_reason present, health 200 before+after), IIRS easy pair exit=1 passed=false `no_confident_alignment` (Task 6 honest class; routing subpixel_cartography/roma2 auto, no flags)
+- [x] `diagnose.py` windowed run clean — real IIRS pair, EXIT=0 all stages + honest diagnosis (log: /tmp/opencode/iris_runs/phase1_diagnose_windowed.log)
 
 ### Phase 2 — Cleanup (post-demo, out of scope for this run — see ledger scope ruling)
 
