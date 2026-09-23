@@ -190,6 +190,7 @@ async def register(
             use_eloftr=True,
             source_window=source_window,
             reference_window=reference_window,
+            manual_incidence_deg=87.886779,
         )
 
         print("=" * 60)
