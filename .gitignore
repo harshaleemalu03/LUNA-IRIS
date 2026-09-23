@@ -13,3 +13,6 @@ backend/benchmark_results/**/*.png
 backend/overlap_preview.png
 backend/third_party/RoMaV2/assets/*.png
 backend/third_party/RoMaV2/assets/*.jpg
+
+models/*.ckpt
+models/*.pt
