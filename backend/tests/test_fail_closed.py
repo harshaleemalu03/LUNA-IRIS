@@ -133,6 +133,9 @@ def test_api_failed_registration_returns_422(monkeypatch):
         "subpixel_refine": {"low_precision": True, "dx": None, "dy": None},
         "orthogonal_gate": {"enabled": True, "passed": False,
                             "reason": "stub_disagreement:999.0px"},
+        "condition_routing": {"regime": "polar_grazing", "incidence_deg": 84.9,
+                              "resolved_matcher": "hybrid_pwift_roma2"},
+        "gsd_scale_prior": 1.006,
     })
 
     resp = _post(client)
@@ -143,6 +146,8 @@ def test_api_failed_registration_returns_422(monkeypatch):
     assert detail["failure_reason"].startswith("verification_gate_failed")
     assert detail["low_precision"] is True
     assert detail["summary_path"]
+    assert detail["condition_routing"]["regime"] == "polar_grazing"
+    assert detail["gsd_scale_prior"] == pytest.approx(1.006)
 
 
 def test_api_success_surfaces_passed_and_low_precision(monkeypatch):

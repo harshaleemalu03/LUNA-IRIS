@@ -101,6 +101,7 @@ async def register(
     sensor: str = Form(...),
     source_window: Optional[str] = Form(None),
     reference_window: Optional[str] = Form(None),
+    incidence_deg: Optional[float] = Form(None),
 ):
     # Parse before the main try/except so malformed input is a client error
     # (422), not a 500 wrapped around the ValueError.
@@ -166,6 +167,12 @@ async def register(
             source_sensor=sensor,
             source_window=src_win,
             reference_window=ref_win,
+            # Uploaded TIFFs arrive without their product XML sidecar, so the
+            # sidecar incidence can't be auto-discovered here — an explicit
+            # incidence_deg (mirrors CLI --incidence-deg) lets the client
+            # route identically to the CLI (polar_grazing for the canonical
+            # pair); otherwise routing falls back to the logged placeholder.
+            manual_incidence_deg=incidence_deg,
             matcher="auto",
             device="cpu",
             use_eloftr=True,
@@ -187,6 +194,8 @@ async def register(
                     "failure_reason": summary.get("failure_reason"),
                     "low_precision": summary.get("subpixel_refine", {}).get("low_precision"),
                     "orthogonal_gate": summary.get("orthogonal_gate"),
+                    "condition_routing": summary.get("condition_routing"),
+                    "gsd_scale_prior": summary.get("gsd_scale_prior"),
                     "summary_path": f"/outputs/{run_id}/summary.json",
                 },
             )

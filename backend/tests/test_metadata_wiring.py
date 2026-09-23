@@ -166,3 +166,24 @@ def test_unknown_filename_falls_back_to_lroc(tmp_path):
 
     assert loaded.sensor.name == "LROC"
     assert [w for w in caught if "Could not auto-detect sensor" in str(w.message)]
+
+
+def test_reference_sensor_autodetects_iirs(tmp_path):
+    """IIRS product prefix must detect too (same gap as OHRXXD): the easy-pair
+    reference would otherwise fall back to LROC — wrong illumination branch
+    and a nonsense approx-GSD prior (80/0.5)."""
+    import warnings
+
+    import cv2
+
+    from lunar_registration.preprocessing import load_image
+
+    p = tmp_path / "IIRXXD18CHO2686502NNNN25244140531312_V2_1_reference.tif"
+    cv2.imwrite(str(p), _synthetic(seed=5))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        loaded = load_image(str(p))
+
+    assert loaded.sensor.name == "IIRS"
+    assert not [w for w in caught if "Could not auto-detect sensor" in str(w.message)]

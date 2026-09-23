@@ -55,12 +55,14 @@ def test_register_forwards_crop_windows(monkeypatch):
             "sensor": "OHRC",
             "source_window": "0,1400,648,2200",
             "reference_window": "770,1768,1142,2713",
+            "incidence_deg": "84.896724",
         },
     )
 
     assert resp.status_code == 200, resp.text
     assert captured["source_window"] == (0, 1400, 648, 2200)
     assert captured["reference_window"] == (770, 1768, 1142, 2713)
+    assert captured["manual_incidence_deg"] == pytest.approx(84.896724)
 
 
 def test_register_rejects_malformed_window(monkeypatch):
