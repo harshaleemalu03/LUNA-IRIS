@@ -1996,59 +1996,6 @@ def attach_lroc_fetched_angles(
 
 
 # ----------------------------------------------------------------------
-# Resampling
-# ----------------------------------------------------------------------
-
-def resample_to_gsd(
-    img: np.ndarray,
-    src_gsd_m: float,
-    dst_gsd_m: float,
-) -> np.ndarray:
-    """
-    Resample image to requested GSD using PIL bilinear resize.
-    """
-
-    if not _HAS_PIL:
-
-        raise ImportError(
-            "PIL required for resample_to_gsd "
-            "(pip install pillow)"
-        )
-
-    scale = (
-        src_gsd_m
-        / dst_gsd_m
-    )
-
-    h, w = img.shape
-
-    new_h = max(
-        1,
-        int(round(h * scale)),
-    )
-
-    new_w = max(
-        1,
-        int(round(w * scale)),
-    )
-
-    pil_img = Image.fromarray(
-        (img * 255).astype(np.uint8)
-    )
-
-    resized = pil_img.resize(
-        (new_w, new_h),
-        Image.BILINEAR,
-    )
-
-    return (
-        np.array(resized)
-        .astype(np.float32)
-        / 255.0
-    )
-
-
-# ----------------------------------------------------------------------
 # GSD-based scale prior (Stage 1.5)
 # ----------------------------------------------------------------------
 
