@@ -68,3 +68,12 @@
 - [x] Full suite green — 93 passed, 1 skipped (`/tmp/opencode/iris_runs/task12_suite.txt`)
 - [x] Real-pair failure classes unchanged vs Phase 1 — canonical exit 1 `no_transform` (tiepoint_coarse derived=true, seed_supported=false), IIRS easy (Phase-0 windows) exit 1 `no_confident_alignment` (derived=true); `tiepoint_coarse` truthful on both (`/tmp/opencode/iris_runs/task12_canonical_cli.log`, `task12_easy_cli.log`)
 - [x] Tiepoint seed cross-checks GSD prior on canonical pair — 0.22% apart via independent metadata paths (`/tmp/opencode/iris_runs/task12_real_pair_evidence.txt`)
+
+## Post-plan (user-driven)
+- [x] Task 13: Explicit source sidecar XML as real input — API `source_xml` upload (optional, sanitized, saved beside the TIFF) + CLI `--source-sidecar-xml`; explicit path → `attach_file_metadata` overrides sibling discovery; broken explicit file = `SidecarXmlError` → API 422 naming it / CLI exit 1; omitted = logged-placeholder fallback; source load only, precedence untouched; frontend `app.js` append written but left **uncommitted** (user's WIP — they commit it with their frontend batch); commit `4ec3fa1`
+  - AC: RED 11 failed → GREEN 12 passed; suite 105 passed (`task13_{red,green,suite}.txt`)
+  - Evidence: CLI flag→isolated 71.2 XML beats neighbor 84.896724 on canonical pair (`task13_canonical_cli.log`); API upload of real XML, no typed incidence → 422 detail shows 84.896724/polar_grazing/hybrid (`task13_api_resp.json`)
+
+### Checkpoint: Task 13
+- [x] Full suite green — 105 passed, 1 skipped (`/tmp/opencode/iris_runs/task13_suite.txt`)
+- [x] Real-pair failure classes unchanged — canonical CLI exit 1 `no_transform`, canonical API 422 structured, both with XML-sourced routing intact (`task13_canonical_cli.log`, `task13_api_resp.json`)

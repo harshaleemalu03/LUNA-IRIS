@@ -85,6 +85,14 @@ hybrid arms stay exactly as they are; every task is wiring, guard, or truth-tell
 - [x] Real-pair failure classes unchanged vs Phase 1 — canonical exit 1 `no_transform` (tiepoint_coarse derived=true, seed_supported=false), IIRS easy (Phase-0 windows) exit 1 `no_confident_alignment` (derived=true); both truthful (`/tmp/opencode/iris_runs/task12_canonical_cli.log`, `task12_easy_cli.log`)
 - [x] Tiepoint seed cross-checks GSD prior on canonical pair — seed scale 1.0089 vs prior 1.00668, 0.22% apart via independent metadata paths (`/tmp/opencode/iris_runs/task12_real_pair_evidence.txt`)
 
+## Task 13 (post-plan, user-driven): Explicit source sidecar XML as a real input
+- [x] The XML the client sends in with the source image is now consumed — API `source_xml` upload field (optional, filename sanitized, saved beside the TIFF) + CLI `--source-sidecar-xml` flag, explicit path plumbed API/CLI → `run_pipeline(source_sidecar_xml)` → `load_image(sidecar_xml_path)` → `attach_file_metadata`, source load only, overriding sibling auto-discovery; broken explicit input raises `SidecarXmlError` (API 422 naming the file / CLI exit 1) instead of silently rerouting at the placeholder; omitted input keeps the logged-placeholder fallback; stdlib ElementTree kept (demo-grade, limitation noted in ledger); frontend `app.js` plug-in append written but left uncommitted with the user's WIP; commit `4ec3fa1`; RED 11 failed → GREEN 12 passed; suite 105 passed
+
+### Checkpoint: Task 13 (source XML input)
+- [x] Full suite green — 105 passed, 1 skipped (`/tmp/opencode/iris_runs/task13_suite.txt`)
+- [x] CLI flag overrides sibling discovery on the real canonical pair — flag points at an isolated XML copy carrying incidence 71.2 while the neighbor XML still holds 84.896724: summary reports 71.2 → `polar_grazing` → `hybrid_pwift_roma2`, exit 1 `no_transform` (failure class unchanged), GSD prior + tiepoint seed intact (`/tmp/opencode/iris_runs/task13_canonical_cli.log`)
+- [x] API input path proven end-to-end — real pair + real XML uploaded with NO typed `incidence_deg`: structured 422 fail-closed carrying `condition_routing.incidence_deg = 84.896724` → `polar_grazing` → `hybrid_pwift_roma2` (`/tmp/opencode/iris_runs/task13_api_resp.json`)
+
 ## Risks and Mitigations
 | Risk | Impact | Mitigation |
 |------|--------|------------|
