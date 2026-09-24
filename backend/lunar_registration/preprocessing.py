@@ -31,6 +31,7 @@ import math
 import os
 import re
 import warnings
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -106,6 +107,17 @@ class LoadedImage:
 # ----------------------------------------------------------------------
 # Metadata reader (georeferencing tags + sidecar XML)
 # ----------------------------------------------------------------------
+
+class SidecarXmlError(ValueError):
+    """An explicitly supplied sidecar XML exists but cannot be used.
+
+    WHY: the caller (API `source_xml` upload / CLI `--source-sidecar-xml`)
+    named a specific file, so degrading to the logged placeholder would
+    silently reroute registration on a guess — fail loudly instead.
+    Subclasses ValueError so generic input-error handlers still classify
+    it as bad caller input rather than an internal crash.
+    """
+
 
 def resolve_sidecar_xml(path: str) -> Optional[str]:
     """Find the product sidecar XML for an image.
@@ -206,12 +218,21 @@ def _pixel_scale_from_georef(georef: dict) -> Optional[Tuple[float, float]]:
     return (x_res, y_res)
 
 
-def attach_file_metadata(loaded: LoadedImage, georef: Optional[dict] = None) -> LoadedImage:
+def attach_file_metadata(
+    loaded: LoadedImage,
+    georef: Optional[dict] = None,
+    sidecar_xml_path: Optional[str] = None,
+) -> LoadedImage:
     """Populate georeferencing + sidecar XML scalars on a freshly loaded image.
 
     Every absent field is logged BY NAME: the pipeline's placeholder defaults
     (scale prior 0.5, routing incidence 30°) must always be traceable to a
     specific missing input, never silent.
+
+    An explicit sidecar_xml_path (API `source_xml` upload / CLI
+    `--source-sidecar-xml`) replaces sibling auto-discovery and must be
+    usable — broken explicit input raises SidecarXmlError instead of
+    degrading, because the caller explicitly sent that file.
     """
     georef = georef or {}
     gcps = georef.get("gcps") or []
@@ -235,17 +256,40 @@ def attach_file_metadata(loaded: LoadedImage, georef: Optional[dict] = None) -> 
             loaded.path,
         )
 
-    xml_path = resolve_sidecar_xml(loaded.path)
-    if xml_path is None:
-        logger.warning(
-            "metadata: %s missing sidecar XML (expected a product .xml next "
-            "to the image with tags: %s) — illumination angles unavailable",
-            loaded.path, ", ".join(SIDECAR_ANGLE_TAGS),
-        )
-        return loaded
+    if sidecar_xml_path is not None:
+        # Explicit input path: the caller named THIS file, so every failure
+        # mode below must raise — silently falling back to placeholders
+        # would reroute registration without the metadata the client
+        # explicitly sent.
+        xml_path = sidecar_xml_path
+        if not os.path.isfile(xml_path):
+            raise SidecarXmlError(
+                f"source sidecar XML not found: {xml_path}"
+            )
+        try:
+            angles = read_sidecar_angles(xml_path)
+        except ET.ParseError as exc:
+            raise SidecarXmlError(
+                f"source sidecar XML is not well-formed: {xml_path} ({exc})"
+            ) from exc
+        if not angles:
+            raise SidecarXmlError(
+                f"source sidecar XML {xml_path} contains none of the "
+                f"recognized angle tags: {', '.join(SIDECAR_ANGLE_TAGS)}"
+            )
+    else:
+        xml_path = resolve_sidecar_xml(loaded.path)
+        if xml_path is None:
+            logger.warning(
+                "metadata: %s missing sidecar XML (expected a product .xml "
+                "next to the image with tags: %s) — illumination angles "
+                "unavailable",
+                loaded.path, ", ".join(SIDECAR_ANGLE_TAGS),
+            )
+            return loaded
+        angles = read_sidecar_angles(xml_path)
 
     loaded.sidecar_path = xml_path
-    angles = read_sidecar_angles(xml_path)
     field_by_tag = {
         "Solar_incidence_angle_in_degree": "sidecar_incidence_deg",
         "Sun_elevation_in_degree": "sidecar_sun_elevation_deg",
@@ -1095,6 +1139,7 @@ def load_image(
     manual_incidence_deg: Optional[float] = None,
     manual_emission_deg: Optional[float] = None,
     manual_phase_deg: Optional[float] = None,
+    sidecar_xml_path: Optional[str] = None,
     nac_pho_path: Optional[str] = None,
     nac_pho_band_phase: int = 2,
     nac_pho_band_emission: int = 3,
@@ -1174,7 +1219,7 @@ def load_image(
         # override the angle source.
         # ----------------------------------------------------------
 
-        attach_file_metadata(loaded, None)
+        attach_file_metadata(loaded, None, sidecar_xml_path=sidecar_xml_path)
 
         if nac_pho_path is not None:
 
@@ -1281,7 +1326,7 @@ def load_image(
         crs=crs,
     )
 
-    attach_file_metadata(loaded, georef)
+    attach_file_metadata(loaded, georef, sidecar_xml_path=sidecar_xml_path)
 
     # ==============================================================
     # Attach angle source

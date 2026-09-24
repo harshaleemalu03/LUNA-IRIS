@@ -8,6 +8,7 @@ End-to-end orchestrator. Run as:
         [--source-nac-pho path/to/NAC_PHO_..._source.cub] \\
         [--reference-nac-pho path/to/NAC_PHO_..._reference.cub] \\
         [--angles-from-label | --source-incidence inc.tif --source-emission emi.tif] \\
+        [--source-sidecar-xml path/to/PROD.xml] \\
         [--window 2243,298,512,512] \\
         [--no-eloftr]
 
@@ -28,6 +29,14 @@ what it does and when it falls back. Explicit `--source-incidence`/
 `--source-emission` paths, if given, always take priority over the label
 shortcut. Neither applies to the reference image, which only supports
 `--reference-nac-pho` for now.
+
+`--source-sidecar-xml` names the source product's sidecar XML explicitly
+(the same file an API client uploads as `source_xml`). It overrides
+sibling auto-discovery — use it when the XML does not sit next to the
+image — and fails loudly (missing, unparseable, or none of the recognized
+angle tags) instead of silently routing at the placeholder. Omit it to
+keep filesystem auto-discovery. See preprocessing.py's
+`resolve_sidecar_xml`/`attach_file_metadata`.
 
 See README.md for full setup (dependencies, ISIS pre-processing needed for
 angle maps, etc).
@@ -211,6 +220,7 @@ def run_pipeline(
     manual_incidence_deg: Optional[float] = None,
     manual_emission_deg: Optional[float] = None,
     manual_phase_deg: Optional[float] = None,
+    source_sidecar_xml: Optional[str] = None,
     window: Optional[Tuple[int, int, int, int]] = None,
     source_window: Optional[Tuple[int, int, int, int]] = None,
     reference_window: Optional[Tuple[int, int, int, int]] = None,
@@ -270,6 +280,9 @@ def run_pipeline(
         angles_from_label=angles_from_label, fetch_angles_online=fetch_angles_online,
         manual_incidence_deg=manual_incidence_deg, manual_emission_deg=manual_emission_deg,
         manual_phase_deg=manual_phase_deg,
+        # Explicit product XML (API upload / --source-sidecar-xml); source
+        # load only — the reference keeps sibling auto-discovery.
+        sidecar_xml_path=source_sidecar_xml,
         nac_pho_path=source_nac_pho_path,
         nac_pho_band_phase=nac_pho_band_phase, nac_pho_band_emission=nac_pho_band_emission,
         nac_pho_band_incidence=nac_pho_band_incidence,
@@ -794,6 +807,12 @@ def main():
     parser.add_argument("--source-incidence", default=None)
     parser.add_argument("--source-emission", default=None)
     parser.add_argument("--source-phase", default=None)
+    parser.add_argument(
+        "--source-sidecar-xml", default=None,
+        help="Explicit path to the source product's sidecar XML. Overrides "
+             "sibling auto-discovery; a missing/unreadable/untagged file "
+             "aborts the run instead of silently routing at the placeholder.",
+    )
     parser.add_argument("--source-nac-pho", default=None,
                          help="Path to the source image's LROC NAC_PHO photometry cube.")
     parser.add_argument("--reference-nac-pho", default=None,
@@ -849,6 +868,7 @@ def main():
         fetch_angles_online=args.fetch_lroc_angles,
         manual_incidence_deg=args.incidence_deg, manual_emission_deg=args.emission_deg,
         manual_phase_deg=args.phase_deg,
+        source_sidecar_xml=args.source_sidecar_xml,
         window=_parse_window(args.window),
         source_window=_parse_window(args.source_window),
         reference_window=_parse_window(args.reference_window),

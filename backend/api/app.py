@@ -11,6 +11,7 @@ import shutil
 import uuid
 
 from lunar_registration.pipeline import run_pipeline, _parse_window
+from lunar_registration.preprocessing import SidecarXmlError
 
 
 # --------------------------------------------------
@@ -98,6 +99,8 @@ def sanitize_for_json(obj):
 async def register(
     source: UploadFile = File(...),
     reference: UploadFile = File(...),
+    # Optional product XML for the source image (routing incidence, etc.).
+    source_xml: Optional[UploadFile] = File(None),
     sensor: str = Form(...),
     source_window: Optional[str] = Form(None),
     reference_window: Optional[str] = Form(None),
@@ -145,6 +148,17 @@ async def register(
         with reference_path.open("wb") as buffer:
             shutil.copyfileobj(reference.file, buffer)
 
+        # Optional source product XML: kept beside the uploaded TIFF and
+        # forwarded by explicit path — uploads land in a fresh per-run dir
+        # where sibling auto-discovery can never see the original layout.
+        # Path(...).name strips any directory a hostile filename carries.
+        source_sidecar_path = None
+        if source_xml is not None:
+            xml_name = Path(source_xml.filename or "source.xml").name
+            source_sidecar_path = run_upload_dir / xml_name
+            with source_sidecar_path.open("wb") as buffer:
+                shutil.copyfileobj(source_xml.file, buffer)
+
         print()
         print("=" * 60)
         print("LUNA-TICS REGISTRATION")
@@ -153,6 +167,8 @@ async def register(
         print(f"Sensor:       {sensor}")
         print(f"Source:       {source_path}")
         print(f"Reference:    {reference_path}")
+        if source_sidecar_path is not None:
+            print(f"Source XML:   {source_sidecar_path}")
         print(f"Output:       {run_output_dir}")
         print("=" * 60)
 
@@ -167,11 +183,14 @@ async def register(
             source_sensor=sensor,
             source_window=src_win,
             reference_window=ref_win,
-            # Uploaded TIFFs arrive without their product XML sidecar, so the
-            # sidecar incidence can't be auto-discovered here — an explicit
-            # incidence_deg (mirrors CLI --incidence-deg) lets the client
-            # route identically to the CLI (polar_grazing for the canonical
-            # pair); otherwise routing falls back to the logged placeholder.
+            # Optional source_xml upload = the product XML, so sidecar
+            # incidence routes exactly like the CLI's sibling discovery.
+            # A typed incidence_deg (mirrors CLI --incidence-deg) still
+            # wins by pipeline precedence when both are sent; with neither,
+            # routing falls back to the logged placeholder.
+            source_sidecar_xml=(
+                str(source_sidecar_path) if source_sidecar_path else None
+            ),
             manual_incidence_deg=incidence_deg,
             matcher="auto",
             device="cpu",
@@ -233,6 +252,12 @@ async def register(
         # Keep 422 (fail-closed) / window-parse errors intact.
         raise
 
+    except SidecarXmlError as e:
+        # The client sent an XML we cannot use (missing / unparseable /
+        # untagged). Routing at a placeholder would hide the bad input —
+        # surface it as a client error naming the file.
+        raise HTTPException(status_code=422, detail=str(e))
+
     except Exception as e:
 
         print()
@@ -250,4 +275,6 @@ async def register(
     finally:
         await source.close()
         await reference.close()
+        if source_xml is not None:
+            await source_xml.close()
 
