@@ -70,6 +70,7 @@ and evaluate each one at full cost.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -244,7 +245,12 @@ def photometric_weighted_structural_maps(
 
     If no angle maps are given (e.g. the reference image, which usually has
     no photometric-geometry product of its own), W falls back to all-ones -
-    Eq 1-2 with no invalid pixels, i.e. fully reliable everywhere.
+    Eq 1-2 with no invalid pixels, i.e. fully reliable everywhere. Task 7:
+    that fallback is now WARNED about ("Akimov inert, W=1") instead of
+    silent, and a THIRD path detects akimov weights that would collapse
+    `w_soft` to all-zero — exp-B: Eq 7/Eq 9 become identically zero and
+    every keypoint is annihilated with no message — and falls back to the
+    same unweighted W=1 computation with a hard warning.
 
     Returns a dict: {"M_PW", "m_PW", "MIM", "w", "w_soft", "mask"}.
     """
@@ -252,12 +258,43 @@ def photometric_weighted_structural_maps(
     if incidence_deg is not None and emission_deg is not None:
         W_norm = akimov_weight(incidence_deg, emission_deg, phase_deg)
     else:
+        # Task 7 guard 1: the pwift_akimov branch reaches here without BOTH
+        # angle maps (reference images by design, or a source whose
+        # label/sidecar angles never loaded). W=1 is the correct fallback —
+        # but say so, so nobody believes Akimov weighting is active.
+        warnings.warn(
+            "pwift_akimov: both incidence and emission maps are required for "
+            f"Akimov weighting (incidence="
+            f"{'present' if incidence_deg is not None else 'missing'}, "
+            f"emission={'present' if emission_deg is not None else 'missing'}) "
+            "- computing UNWEIGHTED structural maps (W=1); Akimov weighting "
+            "is INERT for this image"
+        )
         W_norm = np.ones_like(img, dtype=np.float32)
 
     # L(x): illumination-mask stand-in - see module docstring SWAP POINT.
     L = img
     mW, mask = compute_valid_mask(W_norm, L, w_bg, on_thr)
     w_soft = soft_weight(W_norm, w_soft_lo, w_soft_hi)
+
+    # Task 7 guard 2 (exp-B): weights that collapse w_soft (and/or the mW
+    # reliability mask) to nothing make pc_pw_o (Eq 7) and Sc(x) (Eq 9)
+    # identically zero -> ZERO keypoints, previously with no message at all.
+    # Uniform near-terminator angles hit this via akimov_weight's
+    # zero-variance branch (raw w0 below w_soft_lo everywhere). Fall back to
+    # the unweighted path — the same W=1 computation the no-angles branch
+    # does — so structural energy and keypoints survive.
+    if not np.any(w_soft > 0.0) or not np.any(mW):
+        warnings.warn(
+            "Akimov weight collapse detected: "
+            f"w_soft all-zero={not np.any(w_soft > 0.0)}, "
+            f"reliability mask empty={not np.any(mW)} - would annihilate "
+            "every keypoint (exp-B); falling back to the UNWEIGHTED "
+            "structural maps (W=1)"
+        )
+        W_norm = np.ones_like(img, dtype=np.float32)
+        mW, mask = compute_valid_mask(W_norm, L, w_bg, on_thr)
+        w_soft = soft_weight(W_norm, w_soft_lo, w_soft_hi)
 
     IMG = fft2(img)
     covx2 = np.zeros((rows, cols), dtype=np.float64)
@@ -928,10 +965,60 @@ def _evaluate_rs_candidate(src_img: np.ndarray, desc_r: List[BiChannelDescriptor
     return _lexicographic_key(n_inliers, inlier_ratio, rmse, len(matches))
 
 
+def no_confident_alignment_reason(
+    best_scale: float,
+    best_rot: float,
+    scale_candidates,
+    coarse_rotation_candidates_deg,
+    best_key,
+    all_keys,
+) -> Optional[str]:
+    """Task 6 peak-quality acceptance: WHY the search's argmax must not be
+    trusted, or None when it is an interior peak.
+
+    - Flat surface: every evaluated hypothesis scored the identical key, so
+      the argmax is a stable-sort tie-order artifact, not a peak.
+    - Scale boundary: best_scale is the first/last candidate — the score was
+      still climbing toward the edge, so the true optimum lies OUTSIDE the
+      searched range (the 0.575-band / 3.0 picks in the verification report
+      are exactly this: argmax at the GSD-prior band edge / range edge).
+      Needs >= 3 candidates to have an interior to require; a single fixed
+      scale is sensor configuration, not a search.
+    - Rotation boundary: best_rot at or beyond the coarse rotation domain's
+      extremes (the observed -180 pick; refinement can also push past the
+      grid, e.g. 120+30=150) — same symptom on the rotation axis.
+
+    Returns a human-readable reason (the caller prefixes it into the run's
+    failure_reason) or None for a confident interior peak."""
+    if len(all_keys) > 1 and all(k == best_key for k in all_keys):
+        return (
+            f"flat similarity surface - all {len(all_keys)} evaluated "
+            f"hypotheses scored the same key {best_key}; argmax is a "
+            "tie-order artifact"
+        )
+    if len(scale_candidates) >= 3:
+        lo_s, hi_s = min(scale_candidates), max(scale_candidates)
+        if best_scale == lo_s or best_scale == hi_s:
+            return (
+                f"scale argmax {best_scale!r} sits on the boundary of the "
+                f"searched candidates [{lo_s!r}, {hi_s!r}] - the peak wants "
+                "to leave the search range"
+            )
+    rots = coarse_rotation_candidates_deg
+    if len(rots) >= 2:
+        lo_r, hi_r = min(rots), max(rots)
+        if not (lo_r < best_rot < hi_r):
+            return (
+                f"rotation argmax {best_rot} deg at/outside the coarse-search "
+                f"boundary [{lo_r} deg, {hi_r} deg]"
+            )
+    return None
+
+
 def coarse_to_fine_rotation_scale(
     src_img: np.ndarray, ref_img: np.ndarray, cfg,
     scale_candidates: Optional[Tuple[float, ...]] = None,
-) -> Tuple[float, float]:
+) -> Optional[Tuple[float, float]]:
     """Eq 22-25 (Sec 3.6): coarse-to-fine rotation-scale hypothesis search.
 
     1) Evaluate every scale candidate in Srs (Eq 22) with a lightweight
@@ -946,7 +1033,11 @@ def coarse_to_fine_rotation_scale(
 
     `scale_candidates` overrides `cfg.pwift_scale_candidates` (used by
     `scale.select_best_scale` to substitute a sensor-specific range while
-    keeping the paper's coarse-to-fine *procedure*)."""
+    keeping the paper's coarse-to-fine *procedure*).
+
+    Returns None when there is no confident alignment (Task 6): the argmax
+    sits on a candidate-set boundary or every hypothesis tied — callers must
+    fail closed rather than resample with an untrusted scale/rotation."""
     from PIL import Image as _PILImage
 
     scale_candidates = scale_candidates or cfg.pwift_scale_candidates
@@ -985,7 +1076,10 @@ def coarse_to_fine_rotation_scale(
         key = _evaluate_rs_candidate(small_src, desc_ref, cfg, max_kp, n_scales_search, n_orient_search)
         scored_scales.append((key, s))
     if not scored_scales:
-        return 1.0, 0.0
+        warnings.warn(
+            "coarse_to_fine_rotation_scale: no evaluable scale candidates - "
+            "no confident alignment")
+        return None
     scored_scales.sort(key=lambda t: t[0], reverse=True)
     top_scales = [s for _, s in scored_scales[: cfg.pwift_topk_scale]]
 
@@ -1001,7 +1095,10 @@ def coarse_to_fine_rotation_scale(
             key = _evaluate_rs_candidate(small_src, desc_ref, cfg, max_kp, n_scales_search, n_orient_search)
             rot_scored.append((key, s, rot))
     if not rot_scored:
-        return top_scales[0], 0.0
+        warnings.warn(
+            "coarse_to_fine_rotation_scale: rotation was never evaluable - "
+            "no confident alignment")
+        return None
     rot_scored.sort(key=lambda t: t[0], reverse=True)
     top_coarse = rot_scored[: cfg.pwift_topk_rotation]
 
@@ -1020,9 +1117,23 @@ def coarse_to_fine_rotation_scale(
             k2 = _evaluate_rs_candidate(small_src, desc_ref, cfg, max_kp, n_scales_search, n_orient_search)
             refine_scored.append((k2, s, rr))
 
-    # ---- stage 4: C* = argmax Gamma(C) (Eq 25) ----
+    # ---- stage 4: C* = argmax Gamma(C) (Eq 25) + peak-quality acceptance ----
     refine_scored.sort(key=lambda t: t[0], reverse=True)
-    _, best_scale, best_rot = refine_scored[0]
+    best_key, best_scale, best_rot = refine_scored[0]
+
+    # Task 6: an argmax ON the candidate-set boundary (or a surface where
+    # every hypothesis tied) is not a peak — the score was still rising
+    # toward the edge (true optimum outside the searched range / GSD band)
+    # or stable-sort tie order decided. Say "no confident alignment" instead
+    # of returning a confidently-wrong (scale, rotation).
+    reason = no_confident_alignment_reason(
+        best_scale, best_rot, scale_candidates,
+        cfg.pwift_coarse_rotation_candidates_deg,
+        best_key, [k for k, _, _ in refine_scored],
+    )
+    if reason is not None:
+        warnings.warn(f"coarse_to_fine_rotation_scale: no confident alignment: {reason}")
+        return None
     return best_scale, best_rot
 
 

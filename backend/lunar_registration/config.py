@@ -34,7 +34,7 @@ SENSOR_CONFIGS = {
         scale_range=(0.5, 3.0),
         homography_mode="local",
         approx_gsd_m=0.25,
-        label_keywords=("OHRC", "ORBITER HIGH RESOLUTION CAMERA"),
+        label_keywords=("OHRC", "OHRXXD", "ORBITER HIGH RESOLUTION CAMERA"),
     ),
     "TMC": SensorConfig(
         name="TMC",
@@ -50,7 +50,7 @@ SENSOR_CONFIGS = {
         scale_range=(0.8, 1.25),
         homography_mode="global",
         approx_gsd_m=80.0,
-        label_keywords=("IIRS", "IMAGING INFRARED SPECTROMETER"),
+        label_keywords=("IIRS", "IIRXXD", "IMAGING INFRARED SPECTROMETER"),
     ),
     "LROC": SensorConfig(
         name="LROC",

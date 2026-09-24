@@ -25,6 +25,13 @@ const RegistrationAPI = (() => {
     // Sensor selected from the frontend
     body.append('sensor', sensor);
 
+    // Source product XML (optional): the backend reads its
+    // Solar_incidence_angle for condition routing instead of
+    // falling back to the 30° placeholder for a bare-TIFF upload.
+    if (metadataState.source?.file) {
+      body.append('source_xml', metadataState.source.file);
+    }
+
 
     // Show initial processing step
     onStep && onStep(0);
@@ -437,6 +444,84 @@ function originalCardHTML(idxLabel, inputId, roleLabel, key) {
 setupUploadCard('cardSource', 'fileSource', 'source', 'MOVING');
 setupUploadCard('cardRef', 'fileRef', 'reference', 'FIXED');
 
+/* ============================================================
+   SOURCE METADATA (XML)
+
+   Held in a runtime state separate from `state` on purpose:
+   readiness gating stays untouched. The payload now plugs
+   `metadataState.source.file` in as the `source_xml` upload
+   (see RegistrationAPI.register); omitted when no XML is staged.
+   ============================================================ */
+const metadataState = { source: null }; // { file, text }
+
+const cardMeta = document.getElementById('cardMeta');
+const META_EMPTY_HTML = cardMeta.innerHTML;
+const META_XML_TYPES = ['application/xml', 'text/xml'];
+const META_MAX_BYTES = 25 * 1024 * 1024; // same ceiling as the image cards
+
+function isXmlFile(file) {
+  return file.name.toLowerCase().endsWith('.xml') || META_XML_TYPES.includes(file.type);
+}
+
+function flashMetaInvalid() {
+  cardMeta.style.borderColor = 'var(--err)';
+  setTimeout(() => { cardMeta.style.borderColor = ''; }, 500);
+}
+
+async function handleMetaFile(file) {
+  if (!isXmlFile(file) || file.size > META_MAX_BYTES) { flashMetaInvalid(); return; }
+  const text = await file.text();
+  metadataState.source = { file, text };
+  renderMetaStrip();
+}
+
+function renderMetaStrip() {
+  const current = metadataState.source;
+  cardMeta.classList.toggle('filled', !!current);
+
+  if (current) {
+    cardMeta.innerHTML = `
+      <input type="file" id="fileMetaSrc" accept=".xml,application/xml,text/xml" aria-label="Upload source metadata XML">
+      <span class="meta-icon">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M9 1.5H4A1.5 1.5 0 002.5 3v10A1.5 1.5 0 004 14.5h8a1.5 1.5 0 001.5-1.5V6L9 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 1.5V6h4.5" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+      </span>
+      <span class="meta-copy">
+        <span class="label gold">Source metadata</span>
+        <span class="meta-name">${current.file.name}</span>
+      </span>
+      <span class="status-chip">READY</span>
+      <span class="file-actions">
+        <button type="button" class="replace-btn" aria-label="Replace source metadata" title="Replace">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 7a6 6 0 0110-4.2M13 7a6 6 0 01-10 4.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M11 1v2.8h-2.8M3 13v-2.8h2.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button type="button" class="remove-btn" aria-label="Remove source metadata" title="Remove">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><line x1="2" y1="2" x2="12" y2="12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><line x1="12" y1="2" x2="2" y2="12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        </button>
+      </span>`;
+
+    const newInput = cardMeta.querySelector('input[type=file]');
+    newInput.addEventListener('change', () => { if (newInput.files[0]) handleMetaFile(newInput.files[0]); });
+    cardMeta.querySelector('.replace-btn').addEventListener('click', (e) => { e.preventDefault(); newInput.click(); });
+    cardMeta.querySelector('.remove-btn').addEventListener('click', (e) => { e.preventDefault(); metadataState.source = null; renderMetaStrip(); });
+
+  } else {
+    cardMeta.innerHTML = META_EMPTY_HTML;
+    const input = cardMeta.querySelector('input[type=file]');
+    input.addEventListener('change', () => { if (input.files[0]) handleMetaFile(input.files[0]); });
+  }
+}
+
+// Bind label-level handlers once — the element survives re-renders,
+// only its innerHTML is replaced.
+cardMeta.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); cardMeta.querySelector('input[type=file]').click(); }
+});
+['dragenter','dragover'].forEach(evt => cardMeta.addEventListener(evt, e => { e.preventDefault(); cardMeta.classList.add('drag'); }));
+['dragleave','drop'].forEach(evt => cardMeta.addEventListener(evt, e => { e.preventDefault(); cardMeta.classList.remove('drag'); }));
+cardMeta.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) handleMetaFile(f); });
+
+renderMetaStrip();
+
 function updateInputCompare() {
   const block = document.getElementById('inputCompare');
   if (state.source && state.reference) {
@@ -639,7 +724,8 @@ function renderResults(res) {
 
   outputImg.src = imageUrl;
 
-  const metrics = res.metrics || {};`r`n  console.log("REGISTRATION METRICS:", metrics);
+  const metrics = res.metrics || {};
+  console.log("REGISTRATION METRICS:", metrics);
   const methods = Object.keys(metrics);
 
   if (!methods.length) {

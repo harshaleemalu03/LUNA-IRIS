@@ -8,6 +8,7 @@ End-to-end orchestrator. Run as:
         [--source-nac-pho path/to/NAC_PHO_..._source.cub] \\
         [--reference-nac-pho path/to/NAC_PHO_..._reference.cub] \\
         [--angles-from-label | --source-incidence inc.tif --source-emission emi.tif] \\
+        [--source-sidecar-xml path/to/PROD.xml] \\
         [--window 2243,298,512,512] \\
         [--no-eloftr]
 
@@ -29,6 +30,14 @@ what it does and when it falls back. Explicit `--source-incidence`/
 shortcut. Neither applies to the reference image, which only supports
 `--reference-nac-pho` for now.
 
+`--source-sidecar-xml` names the source product's sidecar XML explicitly
+(the same file an API client uploads as `source_xml`). It overrides
+sibling auto-discovery — use it when the XML does not sit next to the
+image — and fails loudly (missing, unparseable, or none of the recognized
+angle tags) instead of silently routing at the placeholder. Omit it to
+keep filesystem auto-discovery. See preprocessing.py's
+`resolve_sidecar_xml`/`attach_file_metadata`.
+
 See README.md for full setup (dependencies, ISIS pre-processing needed for
 angle maps, etc).
 """
@@ -38,6 +47,8 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
+import math
 import os
 import warnings
 from typing import Any, Dict, List, Optional, Tuple
@@ -49,7 +60,10 @@ import numpy as np
 import cv2
 
 from .config import PipelineConfig, get_sensor_config
-from .preprocessing import load_image, load_angle_maps, LoadedImage, estimate_gsd_scale_prior
+from .preprocessing import (
+    load_image, load_angle_maps, LoadedImage, estimate_gsd_scale_prior,
+    derive_tiepoint_coarse_transform,
+)
 from .illumination import apply_illumination_correction
 from .scale import select_best_scale, apply_scale, apply_rotation
 from .matching import get_matcher, run_pwift_matching, MatchResult, BaseMatcher
@@ -62,11 +76,34 @@ from .metrics import compute_metrics
 from .pwift import reprojection_cleanup
 
 
+logger = logging.getLogger(__name__)
+
+# Largest image the illumination/matching stages can safely process in memory
+# on the CPU-only demo box (~2000x2000). Module-level so tests can shrink it.
+MAX_SAFE_PIXELS = 4_000_000
+
+
 def _parse_window(s: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
     if not s:
         return None
     x, y, w, h = (int(v) for v in s.split(","))
     return x, y, w, h
+
+
+def _center_tile_window(height: int, width: int, max_pixels: int) -> Tuple[int, int, int, int]:
+    """Largest centered crop not exceeding max_pixels, native resolution kept.
+
+    WHY: an explicit crop window is the caller's choice; its absence is not —
+    the fallback must preserve GSD (no rescaling) so the scale prior stays valid.
+    """
+    if height * width <= max_pixels:
+        return 0, 0, width, height
+    scale = math.sqrt(max_pixels / (height * width))
+    nh = max(1, int(round(height * scale)))
+    nw = max(1, int(round(width * scale)))
+    x0 = (width - nw) // 2
+    y0 = (height - nh) // 2
+    return x0, y0, nw, nh
 
 
 def determine_adaptive_matcher(
@@ -137,6 +174,36 @@ def determine_adaptive_matcher(
     }
 
 
+def note_winning_arm_support(
+    contingency: Dict[str, Any],
+    winner_method: str,
+    winner_n_inliers: int,
+) -> Dict[str, Any]:
+    """Task 11: keep contingency_fallback truthful about the arm that WON.
+
+    WHY: the report saw `triggered: False` while the winning arm carried 0
+    geometrically valid inliers — every arm failed to produce verifiable
+    support, which is a contingency state even when no alternate arm
+    remained to run (fallback_matcher stays None: detected, nothing left to
+    try). If the matcher stage already recorded a contingency, the earlier
+    reason is kept and this fact is appended — the summary must carry both.
+    Mutates and returns `contingency`."""
+    if winner_n_inliers > 0:
+        return contingency
+    fact = (
+        f"winning arm '{winner_method}' produced 0 geometrically valid "
+        "inliers — matcher output has no verifiable support"
+    )
+    if contingency.get("triggered"):
+        prior = contingency.get("reason")
+        contingency["reason"] = f"{prior}; {fact}" if prior else fact
+    else:
+        contingency["triggered"] = True
+        contingency["fallback_matcher"] = None
+        contingency["reason"] = fact
+    return contingency
+
+
 def run_pipeline(
     source_path: str, reference_path: str, out_dir: str,
     source_sensor: Optional[str] = None,
@@ -153,9 +220,11 @@ def run_pipeline(
     manual_incidence_deg: Optional[float] = None,
     manual_emission_deg: Optional[float] = None,
     manual_phase_deg: Optional[float] = None,
+    source_sidecar_xml: Optional[str] = None,
     window: Optional[Tuple[int, int, int, int]] = None,
     source_window: Optional[Tuple[int, int, int, int]] = None,
     reference_window: Optional[Tuple[int, int, int, int]] = None,
+    reference_sensor: Optional[str] = None,
     matcher: Optional[str] = None,
     roma2_weights: Optional[str] = None,
     eloftr_checkpoint: Optional[str] = None,
@@ -170,6 +239,10 @@ def run_pipeline(
     cfg: Optional[PipelineConfig] = None,
 ) -> dict:
     cfg = cfg or PipelineConfig()
+
+    # Own the output directory from the start: failure runs never reach
+    # write_outputs, but summary.json must still land somewhere.
+    os.makedirs(out_dir, exist_ok=True)
 
     if eloftr_ckpt:
         eloftr_checkpoint = eloftr_ckpt
@@ -207,30 +280,63 @@ def run_pipeline(
         angles_from_label=angles_from_label, fetch_angles_online=fetch_angles_online,
         manual_incidence_deg=manual_incidence_deg, manual_emission_deg=manual_emission_deg,
         manual_phase_deg=manual_phase_deg,
+        # Explicit product XML (API upload / --source-sidecar-xml); source
+        # load only — the reference keeps sibling auto-discovery.
+        sidecar_xml_path=source_sidecar_xml,
         nac_pho_path=source_nac_pho_path,
         nac_pho_band_phase=nac_pho_band_phase, nac_pho_band_emission=nac_pho_band_emission,
         nac_pho_band_incidence=nac_pho_band_incidence,
     )
     ref: LoadedImage = load_image(
-        reference_path, sensor_hint="LROC", window=reference_window,
+        reference_path, sensor_hint=reference_sensor, window=reference_window,
         nac_pho_path=reference_nac_pho_path,
         nac_pho_band_phase=nac_pho_band_phase, nac_pho_band_emission=nac_pho_band_emission,
         nac_pho_band_incidence=nac_pho_band_incidence,
     )
 
-    _MAX_SAFE_PIXELS = 4_000_000  # ~2000x2000
-    if window is None:
-        for _tag, _loaded in (("source", src), ("reference", ref)):
-            if _loaded.data.size > _MAX_SAFE_PIXELS:
-                _h, _w = _loaded.data.shape
-                raise RuntimeError(
-                    f"{_tag} image '{_loaded.path}' is {_w}x{_h} "
-                    f"({_loaded.data.size:,} px) and no crop window was given. "
-                    "Running the full illumination/matching stage at this "
-                    "resolution will very likely exhaust memory. Pass "
-                    "--source-window x,y,w,h and --reference-window x,y,w,h "
-                    "to crop the common geographic overlap region."
-                )
+    # Size guard: an image with no crop window is auto-center-tiled to
+    # MAX_SAFE_PIXELS with a loud warning; an image with an explicit window
+    # (shared or per-image) is the caller's choice and proceeds as given.
+    # Pixel origin of the crop applied to each load (window or auto-tile);
+    # (0, 0) = full frame. Tiepoints stay full-raster coordinates, so the
+    # Task-12 seed derivation shifts them by exactly this origin.
+    _crop_offsets = {"source": (0, 0), "reference": (0, 0)}
+    for _tag, _loaded, _img_window in (
+        ("source", src, source_window),
+        ("reference", ref, reference_window),
+    ):
+        if _img_window is not None:
+            _crop_offsets[_tag] = (_img_window[0], _img_window[1])
+        if _img_window is None and _loaded.data.size > MAX_SAFE_PIXELS:
+            _h, _w = _loaded.data.shape[:2]
+            _x0, _y0, _nw, _nh = _center_tile_window(_h, _w, MAX_SAFE_PIXELS)
+            _crop_offsets[_tag] = (_x0, _y0)
+            logger.warning(
+                "auto-tile: %s image '%s' is %sx%s (%s px), above the %s px "
+                "safety limit and no crop window was given; center-tiling to "
+                "window %s,%s,%s,%s. Pass --source-window x,y,w,h and "
+                "--reference-window x,y,w,h (API: source_window/reference_window) "
+                "to target the geographic overlap region instead.",
+                _tag, _loaded.path, _w, _h, f"{_loaded.data.size:,}",
+                f"{MAX_SAFE_PIXELS:,}", _x0, _y0, _nw, _nh,
+            )
+            _rows = np.s_[_y0:_y0 + _nh]
+            _cols = np.s_[_x0:_x0 + _nw]
+            _loaded.data = _loaded.data[_rows, _cols]
+            for _arr_name in ("incidence_deg", "emission_deg", "phase_deg"):
+                _arr = getattr(_loaded, _arr_name, None)
+                if isinstance(_arr, np.ndarray) and _arr.shape[:2] == (_h, _w):
+                    setattr(_loaded, _arr_name, _arr[_rows, _cols])
+
+    # Task 12: metadata-derived coarse transform, wired as a candidate
+    # hypothesis for the homography estimator. Crop origins are exact
+    # (window=(x, y, w, h) / auto-tile slice), so full-raster tiepoints are
+    # SHIFTED rather than withheld — every demo run is windowed or tiled.
+    tiepoint_report = derive_tiepoint_coarse_transform(
+        src, ref,
+        src_offset=_crop_offsets["source"],
+        ref_offset=_crop_offsets["reference"],
+    )
 
     src_incidence, src_emission, src_phase = src.incidence_deg, src.emission_deg, src.phase_deg
     if source_incidence_path and source_emission_path:
@@ -248,6 +354,10 @@ def run_pipeline(
         inc_for_routing = float(np.nanmean(src_incidence))
     elif src.incidence_deg is not None:
         inc_for_routing = float(np.nanmean(src.incidence_deg))
+    elif src.sidecar_incidence_deg is not None:
+        # Scalar from the sidecar XML (e.g. Solar_incidence_angle 84.896724):
+        # explicit angles metadata beats any placeholder default.
+        inc_for_routing = float(src.sidecar_incidence_deg)
 
     resolved_matcher, routing_info = determine_adaptive_matcher(
         requested_matcher=matcher,
@@ -258,9 +368,26 @@ def run_pipeline(
 
     # ---- Stage 1.5: GSD-aware scale prior, then coarse-to-fine search ----
     gsd_scale_prior = estimate_gsd_scale_prior(src, ref)
-    best_scale, best_rot = select_best_scale(
+    scale_rot = select_best_scale(
         src.data, ref.data, src.sensor, cfg, prior_scale=gsd_scale_prior,
     )
+    scale_search_failure = None
+    if scale_rot is None:
+        # Task 6: no confident alignment in the coarse search (argmax on a
+        # candidate boundary or flat similarity surface). The run fails
+        # closed below; continuing with an identity placeholder only so
+        # summary.json still records matcher/gate diagnostics for the
+        # failure report.
+        scale_search_failure = (
+            "no_confident_alignment: scale/rotation search returned no "
+            "interior peak (argmax on candidate boundary or flat similarity surface)"
+        )
+        warnings.warn(
+            f"{scale_search_failure} - continuing for diagnostics; "
+            "the run fails closed")
+        best_scale, best_rot = 1.0, 0.0
+    else:
+        best_scale, best_rot = scale_rot
     src_scaled = apply_scale(src.data, best_scale)
     src_scaled = apply_rotation(src_scaled, best_rot)
     src_incidence_scaled = apply_scale(src_incidence, best_scale) if src_incidence is not None else None
@@ -406,6 +533,9 @@ def run_pipeline(
 
     results_by_method = {}
     competition_pool = []
+    # Task 12: did the metadata-seeded hypothesis survive estimation? Used
+    # by summary.tiepoint_coarse; provenance tagging comes from viewpoint.
+    tiepoint_seed_supported = False
 
     for match_result in results_to_evaluate:
         if match_result is None or len(match_result.pts_src) < 4:
@@ -415,8 +545,12 @@ def run_pipeline(
         hom_result = estimate_viewpoint_transform(
             match_result.pts_src, match_result.pts_dst, src.sensor,
             image_shape=src_scaled.shape, cfg=cfg,
+            seed_H=tiepoint_report["H"],
         )
         H_or_local_results = hom_result if isinstance(hom_result, list) else hom_result.H
+        _hypotheses = hom_result if isinstance(hom_result, list) else [hom_result]
+        if any(getattr(r, "provenance", "fitted") == "tiepoint_seed" for r in _hypotheses):
+            tiepoint_seed_supported = True
         inlier_mask = hom_result.inlier_mask if not isinstance(hom_result, list) else np.zeros(
             len(match_result.pts_src), dtype=bool)
         if isinstance(hom_result, list):
@@ -484,6 +618,12 @@ def run_pipeline(
     best_method = comp_res["winner"]["method"]
     best = results_by_method[best_method]
 
+    # Task 11: the summary must not claim "no contingency" when the arm that
+    # won the competition carries zero geometrically valid inliers.
+    note_winning_arm_support(
+        contingency_fallback, best_method, best["metrics"].n_inliers,
+    )
+
     # ---- Orthogonal Verification Gate (gate_cheap) ----
     primary_H = best["hom_result"].H if not isinstance(best["hom_result"], list) else (
         best["hom_result"][0].H if best["hom_result"] else None
@@ -500,48 +640,105 @@ def run_pipeline(
             tau_agree=cfg.orthogonal_gate_tau_agree,
             k_sigma=cfg.orthogonal_gate_k_sigma,
         )
-        if not ortho_eval.get("pass", False):
-            warnings.warn(
-                f"Orthogonal verification gate flagged winning transform: {ortho_eval.get('reason')}. "
-                "Proceeding with flagged confidence."
+
+    # Fail-closed verdict (Task 4): no valid transform, or a gate FAIL, is a
+    # failed registration — never a "flagged confidence" success. Products are
+    # withheld; summary.json still records why (the demo keys off exit codes).
+    # Task 6: an unconfident coarse search is an UPSTREAM failure — it
+    # outranks whatever the gate reports about the mis-scaled diagnostic run.
+    failure_reason = scale_search_failure
+    if failure_reason is None:
+        if primary_H is None:
+            failure_reason = (
+                f"no_transform: matcher '{resolved_matcher}' produced no "
+                "geometrically valid transform"
             )
+        elif ortho_eval is not None and not ortho_eval.get("pass", False):
+            failure_reason = f"verification_gate_failed: {ortho_eval.get('reason')}"
 
-    # ---- Stage 5: MiHo Piecewise Geometry + 6x6 Gridded GCP Optimizer (§2) ----
-    miho_out = miho_plus_gcp(primary_H, best["match_result"], grid_size=cfg.miho_grid_size, target_gcps=cfg.miho_target_gcps)
+    if failure_reason is None:
+        # ---- Stage 5: MiHo Piecewise Geometry + 6x6 Gridded GCP Optimizer (§2) ----
+        miho_out = miho_plus_gcp(primary_H, best["match_result"], grid_size=cfg.miho_grid_size, target_gcps=cfg.miho_target_gcps)
 
-    if not isinstance(best["hom_result"], list):
-        best["hom_result"].Hs_local = miho_out.get("Hs_local")
-        best["hom_result"].gcps = miho_out.get("gcps")
+        if not isinstance(best["hom_result"], list):
+            best["hom_result"].Hs_local = miho_out.get("Hs_local")
+            best["hom_result"].gcps = miho_out.get("gcps")
 
-    # ---- Stage 5.5: Cause-Branched Subpixel Refinement (§5) ----
-    src_inc_mean = float(np.nanmean(src_incidence_scaled)) if src_incidence_scaled is not None else 0.0
-    ref_inc_mean = float(np.nanmean(ref_incidence)) if ref_incidence is not None else 0.0
-    illum_delta_deg = abs(src_inc_mean - ref_inc_mean)
-    subpixel_refine_out = refine_tile(src_scaled, ref.data, illum_delta_deg=illum_delta_deg)
+        # ---- Stage 5.5: Cause-Branched Subpixel Refinement (§5) ----
+        src_inc_mean = float(np.nanmean(src_incidence_scaled)) if src_incidence_scaled is not None else 0.0
+        ref_inc_mean = float(np.nanmean(ref_incidence)) if ref_incidence is not None else 0.0
+        illum_delta_deg = abs(src_inc_mean - ref_inc_mean)
+        subpixel_refine_out = refine_tile(src_scaled, ref.data, illum_delta_deg=illum_delta_deg)
+        # Task 8: the refine's inputs (src_scaled vs ref.data) never include
+        # the matcher's transform, so its dx/dy are the GROSS
+        # source-vs-reference offset — identical for every matcher on this
+        # pair (the report observed 123.5054/271.0260 with pwift and roma2
+        # alike). That is degenerate as a "subpixel refinement" claim: force
+        # low_precision and say why, on top of any value-level objections
+        # refine_tile itself raised (weak peak, non-subpixel magnitude).
+        structural_reason = (
+            "matcher-independent inputs: refine correlates src_scaled vs "
+            "reference without the matcher's transform — dx/dy reproduce the "
+            "gross source-vs-reference offset (identical for every matcher "
+            "on this pair), not a registration residual"
+        )
+        refine_value_reason = subpixel_refine_out.get("reason")
+        subpixel_refine_out["reason"] = (
+            f"{refine_value_reason}; {structural_reason}" if refine_value_reason
+            else structural_reason
+        )
+        subpixel_refine_out["low_precision"] = True
 
-    # ---- Stage 6: georeferencing and output ----
-    registered = register_image(src_scaled, ref.data.shape, best["hom_result"])
-    outputs = write_outputs(
-        out_dir, tag=os.path.splitext(os.path.basename(source_path))[0],
-        registered_img=registered,
-        pts_src=best["match_result"].pts_src, pts_dst=best["match_result"].pts_dst,
-        inlier_mask=best["inlier_mask"], method=best_method,
-        ref_geotransform=ref.geotransform, ref_crs=ref.crs,
-        src_img=src_scaled, ref_img=ref.data,
-        gcps=miho_out.get("gcps", []),
-        export_gcl_gcps_csv=cfg.export_gcl_gcps_csv,
-    )
+        # ---- Stage 6: georeferencing and output ----
+        registered = register_image(src_scaled, ref.data.shape, best["hom_result"])
+        outputs = write_outputs(
+            out_dir, tag=os.path.splitext(os.path.basename(source_path))[0],
+            registered_img=registered,
+            pts_src=best["match_result"].pts_src, pts_dst=best["match_result"].pts_dst,
+            inlier_mask=best["inlier_mask"], method=best_method,
+            ref_geotransform=ref.geotransform, ref_crs=ref.crs,
+            src_img=src_scaled, ref_img=ref.data,
+            gcps=miho_out.get("gcps", []),
+            export_gcl_gcps_csv=cfg.export_gcl_gcps_csv,
+        )
+    else:
+        logger.warning(
+            "fail-closed: %s — withholding MiHo/GCP/refine stages and all "
+            "registered output products (summary.json only)",
+            failure_reason,
+        )
+        miho_out = {"gcps": [], "coverage": 0.0, "Hs_local": None}
+        subpixel_refine_out = {
+            "method": None, "dx": None, "dy": None, "low_precision": True,
+            "reason": f"skipped: {failure_reason}",
+        }
+        outputs = {}
 
     summary = {
         "source": source_path, "reference": reference_path,
+        "passed": failure_reason is None,
+        "failure_reason": failure_reason,
         "sensor": src.sensor.name, "matcher": matcher, "resolved_matcher": resolved_matcher,
         "best_method": best_method,
         "condition_routing": routing_info,
+        "tiepoint_coarse": {
+            "derived": tiepoint_report["H"] is not None,
+            "rotation_deg": tiepoint_report["rotation_deg"],
+            "scale": tiepoint_report["scale"],
+            "reason": tiepoint_report["reason"],
+            # None = nothing was derived (nothing to support); True/False =
+            # derived and the matcher's correspondences did/didn't back it.
+            "seed_supported": (tiepoint_seed_supported
+                               if tiepoint_report["H"] is not None else None),
+        },
         "contingency_fallback": contingency_fallback,
         "orthogonal_gate": {
             "enabled": cfg.enable_orthogonal_gate,
-            "passed": ortho_eval.get("pass", False) if ortho_eval is not None else True,
-            "reason": ortho_eval.get("reason", "disabled") if ortho_eval is not None else "disabled",
+            "passed": (ortho_eval.get("pass", False) if ortho_eval is not None
+                       else primary_H is not None),
+            "reason": (ortho_eval.get("reason") if ortho_eval is not None
+                       else ("disabled" if not cfg.enable_orthogonal_gate
+                             else "skipped: no transform")),
             "cost_ms": ortho_eval.get("cost_ms", 0.0) if ortho_eval is not None else 0.0,
             "struct_ncc": ortho_eval.get("struct_ncc", 0.0) if ortho_eval is not None else 0.0,
         },
@@ -563,6 +760,7 @@ def run_pipeline(
             "dx": subpixel_refine_out.get("dx"),
             "dy": subpixel_refine_out.get("dy"),
             "low_precision": subpixel_refine_out.get("low_precision", False),
+            "reason": subpixel_refine_out.get("reason"),
         },
         "metrics": {
             m: {
@@ -609,6 +807,12 @@ def main():
     parser.add_argument("--source-incidence", default=None)
     parser.add_argument("--source-emission", default=None)
     parser.add_argument("--source-phase", default=None)
+    parser.add_argument(
+        "--source-sidecar-xml", default=None,
+        help="Explicit path to the source product's sidecar XML. Overrides "
+             "sibling auto-discovery; a missing/unreadable/untagged file "
+             "aborts the run instead of silently routing at the placeholder.",
+    )
     parser.add_argument("--source-nac-pho", default=None,
                          help="Path to the source image's LROC NAC_PHO photometry cube.")
     parser.add_argument("--reference-nac-pho", default=None,
@@ -664,6 +868,7 @@ def main():
         fetch_angles_online=args.fetch_lroc_angles,
         manual_incidence_deg=args.incidence_deg, manual_emission_deg=args.emission_deg,
         manual_phase_deg=args.phase_deg,
+        source_sidecar_xml=args.source_sidecar_xml,
         window=_parse_window(args.window),
         source_window=_parse_window(args.source_window),
         reference_window=_parse_window(args.reference_window),
@@ -671,6 +876,11 @@ def main():
         fuse_pwift_eloftr=args.fuse_pwift_eloftr,
     )
     print(json.dumps(summary, indent=2))
+
+    if not summary.get("passed", False):
+        # Fail-closed contract: a registration that failed verification must
+        # exit nonzero so demo scripts/CI never key off a green exit alone.
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

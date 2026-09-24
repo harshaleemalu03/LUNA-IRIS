@@ -423,11 +423,13 @@ class Roma2Matcher(BaseMatcher):
                 pass
 
         cfg = RoMaV2.Cfg(compile=False, setting=self.cfg_setting)
-        self.model = RoMaV2(cfg=cfg)
-
+        # Task 5 (scope lock 2): fine-tune-only. The state dict from
+        # ROMA2_WEIGHTS_PATH is handed to the constructor, which strict-loads
+        # it once — the base romav2.0.1.pt download never runs, and the old
+        # non-strict overlay (load_state_dict(strict=False)) is gone.
         ckpt = torch.load(self.weights_path, map_location="cpu", weights_only=False)
         state_dict = ckpt.get("model", ckpt)
-        self.model.load_state_dict(state_dict, strict=False)
+        self.model = RoMaV2(cfg=cfg, weights=state_dict)
 
         if "cuda" not in str(self.device):
             self.model = self.model.float()

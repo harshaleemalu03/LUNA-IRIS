@@ -148,8 +148,14 @@ def test_pipeline_contingency_fallback_on_neural_exception(tmp_path, monkeypatch
     assert summary["contingency_fallback"]["triggered"] is True
     assert summary["contingency_fallback"]["fallback_matcher"] == "pwift"
     assert "CUDA Out of Memory" in summary["contingency_fallback"]["reason"]
-    assert os.path.exists(summary["outputs"]["registered_png"])
-    assert os.path.exists(summary["outputs"]["matchpoints_csv"])
+    # Task 4 fail-closed contract: this degraded run also fails the
+    # verification gate (146px disagreement in baseline), so it must be
+    # reported as a failure with outputs withheld — the old behavior wrote
+    # registered products and exited 0.
+    assert summary["passed"] is False
+    assert summary["failure_reason"].startswith("verification_gate_failed")
+    assert not summary["outputs"].get("registered_png")
+    assert os.path.exists(os.path.join(out_dir, "summary.json"))
 
 
 def test_pipeline_gcl_gcps_csv_export(tmp_path):

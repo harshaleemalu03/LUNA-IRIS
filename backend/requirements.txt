@@ -11,3 +11,5 @@ fastapi
 uvicorn
 python-multipart
 opencv-python-headless
+# load-bearing pin: 0.8.3 breaks EfficientLoFTR's import path (verified)
+kornia==0.6.8
