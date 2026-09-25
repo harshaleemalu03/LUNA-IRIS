@@ -201,7 +201,23 @@ class PipelineConfig:
     real_time_mode: bool = False                 # operational flag for real-time descent TRN
     real_time_target_fps: float = 10.0          # throughput threshold
     enable_orthogonal_gate: bool = True          # enable gate_cheap in consensus
-    orthogonal_gate_t_struct: float = 0.40       # structural gradient NCC threshold
-    orthogonal_gate_tau_agree: float = 24.0      # max translation discrepancy with 256px phase shift
+    # Structural gradient NCC threshold. Measured on the canonical pair class:
+    # identity 0.024, garbage-H noise 0.040, exhaustive-search best 0.317,
+    # same-content control ceiling 0.474 — 0.40 was above what a correct
+    # transform can reach here, so the gate was unreachable by design.
+    orthogonal_gate_t_struct: float = 0.25
+    orthogonal_gate_tau_agree: float = 24.0      # max residual phase shift after warping by H
     orthogonal_gate_k_sigma: float = 3.0         # scale prior consistency tolerance
     export_gcl_gcps_csv: bool = True             # export {tag}_gcl_gcps.csv
+
+    # ---- Photometric normalization of neural matcher inputs ----
+    # "gradient" = Sobel magnitude / p99.5 (measured 5 -> 25-29 inliers on the
+    # canonical pair), "weber" = local contrast, "clahe", "none" = raw input.
+    neural_input_normalization: str = "gradient"
+
+    # ---- Dense structural-NCC correspondence generator (last-resort arm) ----
+    structural_fallback_enabled: bool = True     # attempt when no arm produced a transform
+    structural_grid: int = 10                    # grid cells per axis over the reference image
+    structural_min_ncc: float = 0.2              # per-cell peak acceptance
+    structural_search_radius_px: int = 48        # local refinement window around the phase-aligned prior
+    structural_min_correspondences: int = 8      # discard the arm below this count
