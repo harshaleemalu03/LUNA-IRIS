@@ -1,18 +1,27 @@
+# Runtime dependencies, every entry pinned to the verified environment
+# (.venv, Python 3.12) so a cold install reproduces the tested stack (TODO-5).
+# Refresh the pins with: uv pip list --python .venv/bin/python --format=freeze
 numpy==1.26.4
-scipy
-opencv-python
-pillow
-rasterio
-planetaryimage
-torch
-transformers
-requests
-fastapi
-uvicorn
-python-multipart
-opencv-python-headless
-huggingface_hub
-einops
-torchvision
+scipy==1.17.1
+opencv-python==4.11.0.86
+pillow==12.3.0
+rasterio==1.4.4
+planetaryimage==0.5.0
+torch==2.14.0
+transformers==5.17.0
+requests==2.34.2
+fastapi==0.141.1
+uvicorn==0.54.0
+python-multipart==0.0.32
+opencv-python-headless==4.11.0.86
+huggingface_hub==1.33.0
+einops==0.8.2
+torchvision==0.29.0
 # load-bearing pin: 0.8.3 breaks EfficientLoFTR's import path (verified)
 kornia==0.6.8
+# Required by the EfficientLoFTR arm (EloftrMatcher imports them at runtime);
+# they were installed in .venv for the test suite but missing from this file.
+yacs==0.1.8
+loguru==0.7.3
+joblib==1.6.0
+pytorch-lightning==2.6.6

@@ -10,8 +10,14 @@
 
 const RegistrationAPI = (() => {
 
-  const REGISTRATION_ENDPOINT =
-  'https://harshaleemalu03-luna-iris.hf.space/api/register';
+  // API base comes from config.js (window.LUNA_API_BASE): "" = same-origin
+  // (Docker/nginx /api proxy), an absolute URL = an explicit backend. When
+  // config.js is absent we keep the previous hardcoded HF Space as fallback.
+  const API_BASE = (typeof window !== 'undefined' && typeof window.LUNA_API_BASE === 'string')
+    ? window.LUNA_API_BASE
+    : 'https://harshaleemalu03-luna-iris.hf.space';
+
+  const REGISTRATION_ENDPOINT = `${API_BASE}/api/register`;
 
 
   async function register({ source, reference, sensor }, onStep) {
@@ -89,7 +95,11 @@ const RegistrationAPI = (() => {
 
 
   return {
-    register
+    register,
+    // Exported so result URLs resolve against the same configured backend
+    // as the POST (Docker serves /outputs same-origin; the HF fallback keeps
+    // pointing at the hosted Space).
+    apiBase: API_BASE
   };
 
 })();
@@ -704,8 +714,7 @@ function renderResults(res) {
     return;
   }
 
-  const imageUrl =
-    "https://harshaleemalu03-luna-iris.hf.space" + res.output_image;
+  const imageUrl = RegistrationAPI.apiBase + res.output_image;
 
   console.log("MATCHES IMAGE URL:", imageUrl);
 

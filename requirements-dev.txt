@@ -1,3 +1,5 @@
 # Test-only dependencies (not required to run the API).
 # Install: uv pip install --python .venv/bin/python -r requirements-dev.txt
 pytest==9.1.1
+# FastAPI's TestClient is built on httpx — needed by backend/tests.
+httpx==0.28.1

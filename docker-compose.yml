@@ -1,0 +1,75 @@
+# LUNA-IRiS — two-service stack: the FastAPI registration API and the
+# static frontend behind nginx.
+#
+# Why two published ports:
+#   API_PORT (default 7860) -> the API directly (debugging / curl / non-browser
+#           clients). Overridable because port 8000 is a common choice for
+#           other local services; inside the compose network the api service
+#           is always reachable at http://api:8000.
+#   5173 -> the UI. That origin is already in the API's CORS allowlist and
+#           is the port the plain `python3 -m http.server` dev flow uses,
+#           so nothing in the frontend or the API had to change. The browser
+#           only ever talks to 5173: nginx proxies /api and /outputs to the
+#           api service, making every request same-origin (CORS never enters
+#           the picture).
+
+services:
+  api:
+    build:
+      context: .
+      args:
+        # CPU-only torch wheels — the PyPI/CUDA build does not fit on disk.
+        # The image build fails if a non-CPU wheel is resolved.
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+    ports:
+      - "${API_PORT:-7860}:8000"
+    environment:
+      # Weights are NOT in the repo (README "Model Setup"): point the
+      # pipeline at the models mount below. Without weights the neural
+      # matchers raise MissingWeights and the pipeline degrades honestly to
+      # the PWIFT contingency fallback — the stack still answers.
+      LUNATICS_MODELS_DIR: /app/models
+      # ROMA2_WEIGHTS_PATH is read first by the resolver if you need to name
+      # a specific file, e.g. in a .env: ROMA2_WEIGHTS_PATH=/app/models/<file>
+    volumes:
+      # Registration products must survive restarts: uploads are the inputs,
+      # outputs is what the API serves at /outputs (StaticFiles mount) and
+      # what the UI links to after a run.
+      - api-uploads:/app/backend/uploads
+      - api-outputs:/app/backend/outputs
+      # Host weights, read-only. Defaults to ./models (create it first or
+      # set MODELS_DIR=/path/to/weights); a missing mount just means the
+      # pipeline runs in PWIFT-only contingency mode.
+      - ${MODELS_DIR:-./models}:/app/models:ro
+    healthcheck:
+      # curl is installed in the image for exactly this.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # importing torch + the pipeline on a cold CPU is slow
+      start_period: 30s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "5173:80"
+    environment:
+      # API base URL baked into config.js at container start. Empty
+      # (default) = same-origin: the UI posts to /api/register on itself and
+      # nginx proxies to the api service. Set an absolute URL to point the
+      # UI at a different backend instead.
+      LUNA_API_BASE: ${LUNA_API_BASE:-}
+    # nginx resolves `api` per request (embedded DNS in nginx.conf), so this
+    # is ordering sugar rather than a hard requirement.
+    depends_on:
+      - api
+    restart: unless-stopped
+
+# Declared at the bottom, compose convention. Anonymous-free named volumes so
+# `docker compose down` keeps registration products unless -v is passed.
+volumes:
+  api-uploads:
+  api-outputs:

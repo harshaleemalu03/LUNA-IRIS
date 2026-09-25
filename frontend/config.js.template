@@ -1,0 +1,5 @@
+/* API base URL for js/app.js — RENDERED AT CONTAINER START from this
+   template by docker-entrypoint.sh (envsubst). Do not edit the rendered
+   file: set LUNA_API_BASE on the frontend service instead.
+   "" (compose default) = same-origin requests through the nginx /api proxy. */
+window.LUNA_API_BASE = "${LUNA_API_BASE}";
