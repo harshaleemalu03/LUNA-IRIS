@@ -60,10 +60,12 @@ Verify: `.venv/bin/python -m pytest backend/tests/test_photometric.py -q`
 Deps: 1 | Files: `backend/lunar_registration/photometric.py` (new), `config.py`, `backend/tests/test_photometric.py` (new) | Scope: S
 
 ### Task 5: `structural.py` — dense structural-NCC correspondence generator
-Description: `structural_ncc_correspondences(src_img, ref_img, scale, rotation_deg, grid, search_radius_px, min_ncc) -> MatchResult`.
-Builds an affine prior (scale + rotation from the coarse search, translation by phase correlation
-in the rotated/scaled frame), warps the source into the reference frame, then takes the best NCC
-peak per grid cell via `cv2.matchTemplate`, mapping each peak back to source coordinates.
+Description: `structural_ncc_correspondences(src_img, ref_img, cfg=None) -> MatchResult`.
+Takes a translation prior by phase correlation (Stage 3 has already applied the coarse scale and
+rotation to `src_img`), warps the source into the reference frame, then takes the best NCC peak per
+grid cell of the Sobel-gradient maps via `cv2.matchTemplate`, mapping each peak back to source
+coordinates with the inverse of the prior. Returns a normal `MatchResult` so Stage 4 estimates a
+homography from it exactly as it would from a matcher arm.
 
 AC:
 - [ ] On a synthetic pair with known H (≈11° rotation, translation, scale ≈1): ≥ 50 correspondences with NCC ≥ 0.2 and ≥ 50% grid-cell coverage

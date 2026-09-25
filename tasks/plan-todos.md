@@ -27,9 +27,10 @@ lives in `tasks/plan-todos.md` with its task list in `tasks/todo-todos.md`.
   is a different concern with different consumers, so it gets its own module with one public
   function.
 - **Structural correspondences live in a new `structural.py`** and return a normal `MatchResult`, so
-  they enter Stage 4 through the *same* estimation path as any matcher arm. The prior is built inside
-  the module (scale/rotation from the coarse search + translation by phase correlation), keeping the
-  pipeline hook to a single call.
+  they enter Stage 4 through the *same* estimation path as any matcher arm. The prior is a
+  translation obtained by phase correlation inside the module — by the time Stage 3/4 run, Stage 3
+  has already applied the coarse scale and rotation to the source (`src_scaled`), so translation is
+  the only unknown left. The pipeline hook stays a single call.
 - **Neural arms always compete against PWIFT.** `matcher=roma2|eloftr` currently short-circuits to a
   single arm, so `compete_rigid` never has anything to arbitrate. Neural resolution now also runs
   PWIFT and fuses (the existing hybrid path); `matcher=pwift` stays single-arm by construction.
