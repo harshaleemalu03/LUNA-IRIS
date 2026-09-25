@@ -43,6 +43,10 @@ lives in `tasks/plan-todos.md` with its task list in `tasks/todo-todos.md`.
 
 ## Task List
 
+> **Status: complete (2026-09-25).** Final suite `151 passed, 1 skipped` (baseline 105). Branch
+> `feat/todos-backlog`. Where a `TODOs.md` acceptance criterion could not be evidenced in this
+> environment it is annotated as not-evidenced in `TODOs.md` rather than ticked.
+
 ### Phase 0 — Baseline
 - [x] Task 1: Restore a working dev environment and record the regression baseline
   - AC: `.venv` (py3.12) installs `requirements.txt` + test deps; `pytest backend/tests -q` → **105 passed, 1 skipped** (was 1 failed after a bare install: missing `pytest/yacs/loguru/joblib/pytorch-lightning`).
@@ -50,37 +54,39 @@ lives in `tasks/plan-todos.md` with its task list in `tasks/todo-todos.md`.
   - Files: `requirements-dev.txt` (new, records the test-only deps)
 
 ### Phase 1 — Verification gate correctness (TODO-3, TODO-4)
-- [ ] Task 2: Rotation/scale-aware gate check #1
-- [ ] Task 3: Recalibrate `orthogonal_gate_t_struct` to the measured band
+- [x] Task 2: Rotation/scale-aware gate check #1
+- [x] Task 3: Recalibrate `orthogonal_gate_t_struct` to the measured band
 
 ### Checkpoint: Phase 1
-- [ ] `pytest backend/tests/test_gate_rotation.py backend/tests/test_verify.py -q` green
-- [ ] Full suite green, no fail-closed regression (every previously failing run still fails)
+- [x] `pytest backend/tests/test_gate_rotation.py backend/tests/test_verify.py -q` green → **11 passed**
+- [x] Full suite green, no fail-closed regression (every previously failing run still fails)
 
 ### Phase 2 — Isolated modules (TODO-6, TODO-8 foundations)
-- [ ] Task 4: `photometric.py` — matcher-input normalization (gradient / weber / clahe / none)
-- [ ] Task 5: `structural.py` — dense structural-NCC correspondence generator
+- [x] Task 4: `photometric.py` — matcher-input normalization (gradient / weber / clahe / none)
+- [x] Task 5: `structural.py` — dense structural-NCC correspondence generator
 
 ### Checkpoint: Phase 2
-- [ ] New module tests green; full suite still green
+- [x] New module tests green (`test_photometric.py` + `test_structural.py` → **23 passed**); full suite still green
 
 ### Phase 3 — Pipeline integration
-- [ ] Task 6: Normalize neural matcher inputs in Stage 3
-- [ ] Task 7: Route neural arms through fusion + competition, surface contingency in the API
-- [ ] Task 8: Structural-NCC arm as last resort in Stage 4
+- [x] Task 6: Normalize neural matcher inputs in Stage 3
+- [x] Task 7: Route neural arms through fusion + competition, surface contingency in the API
+- [x] Task 8: Structural-NCC arm as last resort in Stage 4
 
 ### Checkpoint: Phase 3
-- [ ] Full suite green
-- [ ] Canonical + easy real pair: fail classes unchanged (honest failure), structural arm reported in summary when it fires
+- [x] Full suite green
+- [x] Canonical + easy real pair: fail classes unchanged (honest failure), structural arm reported in summary when it fires
+  - Canonical run: `passed:false`, `failure_reason: no_transform`, exit **1**, `structural_correspondences {attempted:true, n:0, used:false}` in `summary.json`.
 
 ### Phase 4 — Packaging
-- [ ] Task 9: Pin runtime dependencies (TODO-5 remainder)
-- [ ] Task 10: Dockerfile + `docker-compose.yml` + `.dockerignore`
+- [x] Task 9: Pin runtime dependencies (TODO-5 remainder)
+- [x] Task 10: Dockerfile + `docker-compose.yml` + `.dockerignore`
 
 ### Checkpoint: Complete
-- [ ] `docker compose config` valid, stack builds, `/api/health` OK, frontend served, one registration request answered
-- [ ] `TODOs.md` checkboxes updated to reflect delivered items
-- [ ] Full suite green; everything committed on a feature branch
+- [x] `docker compose config` valid, stack builds, `/api/health` OK, frontend served, one registration request answered
+  - `docker compose config -q` clean; API on host **7860** (host 8000 belongs to `searxng-core`), frontend on **5173** with nginx proxying `/api` + `/outputs`; `POST localhost:5173/api/register` → HTTP 200, `passed:true`, `orthogonal_gate_passed:true`.
+- [x] `TODOs.md` checkboxes updated to reflect delivered items (deferred section untouched; not-evidenced criteria annotated inline)
+- [x] Full suite green (`151 passed, 1 skipped`); everything committed on a feature branch (`feat/todos-backlog`, not pushed)
 
 ## Risks and Mitigations
 | Risk | Impact | Mitigation |
