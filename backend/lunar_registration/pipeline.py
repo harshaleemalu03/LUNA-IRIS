@@ -876,6 +876,12 @@ def run_pipeline(
         "failure_reason": failure_reason,
         "sensor": src.sensor.name, "matcher": matcher, "resolved_matcher": resolved_matcher,
         "best_method": best_method,
+        # The gate verifies THIS transform, so the report has to carry it:
+        # a 3x3 homography from the coarse-aligned source into the reference
+        # frame (None when no arm produced one). Consumers decompose it to
+        # recover the rotation/scale the run actually committed to.
+        "homography": (None if primary_H is None
+                       else np.asarray(primary_H, dtype=float).tolist()),
         "condition_routing": routing_info,
         "tiepoint_coarse": {
             "derived": tiepoint_report["H"] is not None,
