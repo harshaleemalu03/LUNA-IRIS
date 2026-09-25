@@ -10,6 +10,8 @@ from pathlib import Path
 import shutil
 import uuid
 
+from huggingface_hub import hf_hub_download
+
 from lunar_registration.pipeline import run_pipeline, _parse_window
 from lunar_registration.preprocessing import SidecarXmlError
 
@@ -48,6 +50,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 UPLOAD_DIR = BASE_DIR / "uploads"
 OUTPUT_DIR = BASE_DIR / "outputs"
+
+# Download EfficientLoFTR checkpoint from the HF model repository
+ELOFTR_MODEL_PATH = BASE_DIR / "models" / "eloftr_lunar.ckpt"
+ELOFTR_MODEL_PATH.parent.mkdir(exist_ok=True)
+if not ELOFTR_MODEL_PATH.exists():
+    hf_hub_download(
+        repo_id="harshaleemalu03/LUNA-IRiS-models",
+        filename="eloftr_lunar.ckpt",
+        local_dir=str(ELOFTR_MODEL_PATH.parent),
+    )
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -343,4 +355,6 @@ async def register(
         await reference.close()
         if source_xml is not None:
             await source_xml.close()
+
+
 

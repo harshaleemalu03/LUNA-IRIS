@@ -18,3 +18,5 @@ yacs
 einops
 loguru
 pytorch-lightning
+
+huggingface_hub
