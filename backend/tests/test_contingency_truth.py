@@ -15,6 +15,8 @@ winner provably has 0 inliers, and asserts the summary reflects it.
 import cv2
 import numpy as np
 
+from lunar_registration.config import PipelineConfig
+
 
 def _related_pair(tmp_path, seed=11):
     """Same synthetic family as test_subpixel_refine_honesty (proven to
@@ -132,6 +134,11 @@ def test_pipeline_summary_truthful_when_winner_has_zero_inliers(tmp_path, monkey
         source_path=src_path, reference_path=ref_path,
         out_dir=str(tmp_path / "out_cont"),
         source_sensor="LROC", matcher="pwift",
+        # Task 8 edit: the structural-NCC last-resort arm would now rescue
+        # this transform-less run (winner with REAL inliers), destroying the
+        # scenario under test. Disabling it pins the pre-Task-8 world this
+        # Task-11 test is about: no arm produces a transform at all.
+        cfg=PipelineConfig(structural_fallback_enabled=False),
     )
 
     # Sanity: competition ran, and the winning arm PROVABLY had 0 inliers
