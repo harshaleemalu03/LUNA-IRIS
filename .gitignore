@@ -1,5 +1,8 @@
 models/romav2_stereolunar_finetuned.pt
 
+# local SIH data archive (132 MB) — ships with the demo, never committed
+data_for_sih_2026.zip
+
 backend/uploads/
 backend/outputs/
 backend/.venv/
