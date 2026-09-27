@@ -102,6 +102,7 @@ class LoadedImage:
     sidecar_incidence_deg: Optional[float] = None
     sidecar_sun_elevation_deg: Optional[float] = None
     sidecar_sun_azimuth_deg: Optional[float] = None
+    sidecar_resolution_m: Optional[float] = None
 
 
 # ----------------------------------------------------------------------
@@ -136,12 +137,12 @@ def resolve_sidecar_xml(path: str) -> Optional[str]:
 
 
 def read_sidecar_angles(xml_path: str) -> dict:
-    """Return {tag: float} for every illumination angle tag present in the XML."""
+    """Return {tag: float} for every recognized numeric metadata tag in the XML."""
     import xml.etree.ElementTree as ET
 
     tree = ET.parse(xml_path)
     angles: dict = {}
-    for tag in SIDECAR_ANGLE_TAGS:
+    for tag in SIDECAR_ANGLE_TAGS + ("Resolution_in_meter",):
         el = tree.find(f".//{tag}")
         if el is not None and el.text:
             try:
@@ -295,6 +296,8 @@ def attach_file_metadata(
         "Sun_elevation_in_degree": "sidecar_sun_elevation_deg",
         "Sun_azimuth_in_degree": "sidecar_sun_azimuth_deg",
     }
+    if "Resolution_in_meter" in angles:
+        loaded.sidecar_resolution_m = angles["Resolution_in_meter"]
     for tag, field in field_by_tag.items():
         if tag in angles:
             setattr(loaded, field, angles[tag])
@@ -2308,7 +2311,11 @@ def estimate_gsd_scale_prior(
     2x to match the reference's pixel scale (i.e. src has 2x coarser GSD
     than ref).
     """
-    src_gsd = src.gsd_m or getattr(src.sensor, "approx_gsd_m", None)
+    src_gsd = (
+        src.sidecar_resolution_m
+        or src.gsd_m
+        or getattr(src.sensor, "approx_gsd_m", None)
+    )
     ref_gsd = ref.gsd_m or getattr(ref.sensor, "approx_gsd_m", None)
     logger.warning("GSD DEBUG: src_gsd=%s ref_gsd=%s", src_gsd, ref_gsd)
 
