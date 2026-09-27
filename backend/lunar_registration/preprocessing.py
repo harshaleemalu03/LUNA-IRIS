@@ -2310,6 +2310,7 @@ def estimate_gsd_scale_prior(
     """
     src_gsd = src.gsd_m or getattr(src.sensor, "approx_gsd_m", None)
     ref_gsd = ref.gsd_m or getattr(ref.sensor, "approx_gsd_m", None)
+    logger.warning("GSD DEBUG: src_gsd=%s ref_gsd=%s", src_gsd, ref_gsd)
 
     if not src_gsd or not ref_gsd or src_gsd <= 0 or ref_gsd <= 0:
         warnings.warn(
