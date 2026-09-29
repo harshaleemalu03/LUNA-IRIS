@@ -16,7 +16,7 @@ python-multipart==0.0.32
 opencv-python-headless==4.11.0.86
 huggingface_hub==1.33.0
 einops==0.8.2
-torchvision==0.15.2
+torchvision==0.28.0
 # load-bearing pin: 0.8.3 breaks EfficientLoFTR's import path (verified)
 kornia==0.6.8
 # Required by the EfficientLoFTR arm (EloftrMatcher imports them at runtime);
