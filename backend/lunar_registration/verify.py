@@ -246,8 +246,15 @@ def compete_rigid(
             "reason": "no_candidates",
         }
 
+    # Prioritize candidates with verified inliers over arms that produced 0 inliers
+    candidates_with_inliers = [
+        c for c in candidates
+        if c.get("metrics") is not None and getattr(c["metrics"], "n_inliers", 0) > 0
+    ]
+    candidates_to_score = candidates_with_inliers if candidates_with_inliers else candidates
+
     scored: List[Dict[str, Any]] = []
-    for c in candidates:
+    for c in candidates_to_score:
         warp = np.asarray(c.get("warp", np.eye(3)), dtype=np.float64)
         fit = float(c.get("fit", 0.0))
         cov = float(c.get("coverage", 0.0))

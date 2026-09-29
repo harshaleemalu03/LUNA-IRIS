@@ -189,14 +189,14 @@ def test_cfg_dispatcher_reads_neural_input_normalization():
     img = _synthetic_lunar_image()
 
     cfg = PipelineConfig()
-    assert cfg.neural_input_normalization == "gradient"  # plan default
-    np.testing.assert_array_equal(
-        normalize_for_matching_cfg(img, cfg),
-        normalize_for_matching(img, "gradient"),
-    )
-
-    cfg.neural_input_normalization = "clahe"
+    assert cfg.neural_input_normalization == "clahe"  # plan default
     np.testing.assert_array_equal(
         normalize_for_matching_cfg(img, cfg),
         normalize_for_matching(img, "clahe"),
+    )
+
+    cfg.neural_input_normalization = "gradient"
+    np.testing.assert_array_equal(
+        normalize_for_matching_cfg(img, cfg),
+        normalize_for_matching(img, "gradient"),
     )

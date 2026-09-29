@@ -1051,9 +1051,17 @@ def coarse_to_fine_rotation_scale(
     n_orient_search = getattr(cfg, "pwift_search_orientations", cfg.pwift_orientations)
 
     def resize(a, size):
-        return np.array(
-            _PILImage.fromarray((np.clip(a, 0, 1) * 255).astype(np.uint8)).resize((size, size))
+        h, w = a.shape[:2]
+        scale = float(size) / max(h, w)
+        new_w, new_h = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+        resized = np.array(
+            _PILImage.fromarray((np.clip(a, 0, 1) * 255).astype(np.uint8)).resize((new_w, new_h))
         ).astype(np.float32) / 255.0
+        canvas = np.zeros((size, size), dtype=np.float32)
+        y_off = (size - new_h) // 2
+        x_off = (size - new_w) // 2
+        canvas[y_off:y_off + new_h, x_off:x_off + new_w] = resized
+        return canvas
 
     small_ref = resize(ref_img, coarse_size)
     # PERF FIX: compute the reference side's descriptors ONCE, up front.

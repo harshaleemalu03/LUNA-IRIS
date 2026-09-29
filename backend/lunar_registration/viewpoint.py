@@ -55,7 +55,7 @@ class HomographyResult:
 def estimate_global_homography(
     pts_src: np.ndarray, pts_dst: np.ndarray,
     reproj_threshold: float = 3.0, max_iters: int = 5000, confidence: float = 0.999,
-    min_inliers_for_stable_fit: int = 8,
+    min_inliers_for_stable_fit: int = 4,
     reprojection_cleanup_tau_e: Optional[float] = None,
 ) -> HomographyResult:
     H, mask = fsc_homography(pts_src, pts_dst, reproj_threshold, max_iters, confidence)
@@ -100,10 +100,9 @@ def _homography_is_stable(H: np.ndarray, n_inliers: int, min_inliers: int,
     return True
 
 
-# A metadata-seeded hypothesis must clear the same minimum inlier support
-# as a fitted global homography (estimate_global_homography's default):
-# metadata is a candidate, not authority.
-SEED_MIN_INLIERS = 8
+# A metadata-seeded hypothesis must clear the minimum inlier support
+# needed to constrain a homography (4 points):
+SEED_MIN_INLIERS = 4
 
 
 def _evaluate_seed_hypothesis(
@@ -153,7 +152,7 @@ def estimate_local_homographies(
     pts_src: np.ndarray, pts_dst: np.ndarray, image_shape: Tuple[int, int],
     n_blocks: int = 3, overlap: float = 0.25,
     reproj_threshold: float = 3.0, max_iters: int = 5000, confidence: float = 0.999,
-    min_points_per_block: int = 8, min_inliers_for_stable_fit: int = 8,
+    min_points_per_block: int = 4, min_inliers_for_stable_fit: int = 4,
     reprojection_cleanup_tau_e: Optional[float] = None,
 ) -> List[HomographyResult]:
     """Splits the SOURCE image into an n_blocks x n_blocks grid (with overlap

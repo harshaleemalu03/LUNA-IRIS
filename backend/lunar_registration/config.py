@@ -211,9 +211,13 @@ class PipelineConfig:
     export_gcl_gcps_csv: bool = True             # export {tag}_gcl_gcps.csv
 
     # ---- Photometric normalization of neural matcher inputs ----
-    # "gradient" = Sobel magnitude / p99.5 (measured 5 -> 25-29 inliers on the
-    # canonical pair), "weber" = local contrast, "clahe", "none" = raw input.
-    neural_input_normalization: str = "gradient"
+    # "clahe" = adaptive histogram equalization (best for preserving crater morphology),
+    # "gradient" = Sobel magnitude / p99.5, "weber" = local contrast, "none" = raw input.
+    neural_input_normalization: str = "clahe"
+
+    # ---- RoMaV2 neural matcher tuning ----
+    roma2_min_tile_iou: float = 0.40             # min spatial IoU for pairing sliding-window tiles
+    roma2_min_confidence: float = 0.15           # min predicted overlap confidence for keypoint samples
 
     # ---- Dense structural-NCC correspondence generator (last-resort arm) ----
     structural_fallback_enabled: bool = True     # attempt when no arm produced a transform

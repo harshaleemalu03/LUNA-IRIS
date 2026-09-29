@@ -136,9 +136,9 @@ def _run(tmp_path, monkeypatch, tag, **run_kwargs):
 
 
 def test_neural_arm_gets_normalized_inputs_pwift_keeps_raw(tmp_path, monkeypatch):
-    """AC: default mode 'gradient' — the neural arm receives arrays that
+    """AC: default mode 'clahe' — the neural arm receives arrays that
     DIFFER from the raw inputs; the PWIFT arm receives the raw inputs."""
-    assert PipelineConfig().neural_input_normalization == "gradient"  # plan default
+    assert PipelineConfig().neural_input_normalization == "clahe"  # plan default
     _, neural, pwift, raw = _run(tmp_path, monkeypatch, "grad")
 
     n_src, n_ref = neural.received
