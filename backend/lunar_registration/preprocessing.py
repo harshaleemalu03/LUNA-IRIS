@@ -219,6 +219,32 @@ def _pixel_scale_from_georef(georef: dict) -> Optional[Tuple[float, float]]:
     return (x_res, y_res)
 
 
+def _parse_xml_corners(xml_path: str) -> Optional[List[Tuple[float, float]]]:
+    """Extract corner coordinates from Chandrayaan-2 XML sidecars.
+    Returns [(tl_x, tl_y), (tr_x, tr_y), (bl_x, bl_y), (br_x, br_y)] in projected meters."""
+    try:
+        root = ET.parse(xml_path).getroot()
+        corners_elem = root.find(".//corners")
+        if corners_elem is None:
+            return None
+
+        def _get_val(tag):
+            el = corners_elem.find(tag)
+            return float(el.text.strip()) if el is not None and el.text else None
+
+        # Tags in C2 IIRS sidecars:
+        tl_x, tl_y = _get_val("topleft_longitude_en"), _get_val("topleft_latitude_en")
+        tr_x, tr_y = _get_val("topright_longitude_en"), _get_val("topright_latitude_en")
+        bl_x, bl_y = _get_val("bottomleft_longitude_en"), _get_val("bottomleft_latitude_en")
+        br_x, br_y = _get_val("bottomright_longitude_en"), _get_val("bottomright_latitude_en")
+
+        if all(v is not None for v in (tl_x, tl_y, tr_x, tr_y, bl_x, bl_y, br_x, br_y)):
+            return [(tl_x, tl_y), (tr_x, tr_y), (bl_x, bl_y), (br_x, br_y)]
+        return None
+    except Exception:
+        return None
+
+
 def attach_file_metadata(
     loaded: LoadedImage,
     georef: Optional[dict] = None,
@@ -291,6 +317,29 @@ def attach_file_metadata(
         angles = read_sidecar_angles(xml_path)
 
     loaded.sidecar_path = xml_path
+
+    # Fallback to XML corners if no GeoTIFF GCPs and no non-identity geotransform exist
+    has_geotransform = (
+        loaded.geotransform is not None and
+        tuple(loaded.geotransform)[:6] != _IDENTITY_TRANSFORM
+    )
+    if not loaded.corner_tiepoints and not has_geotransform and xml_path:
+        xml_corners = _parse_xml_corners(xml_path)
+        if xml_corners:
+            h, w = loaded.data.shape[:2]
+            (tl_x, tl_y), (tr_x, tr_y), (bl_x, bl_y), (br_x, br_y) = xml_corners
+            loaded.corner_tiepoints = [
+                (0, 0, tl_x, tl_y),
+                (0, w, tr_x, tr_y),
+                (h, 0, bl_x, bl_y),
+                (h, w, br_x, br_y),
+            ]
+            if loaded.gsd_m is None and w > 0 and h > 0:
+                dx = ((tr_x - tl_x) ** 2 + (tr_y - tl_y) ** 2) ** 0.5
+                dy = ((bl_x - tl_x) ** 2 + (bl_y - tl_y) ** 2) ** 0.5
+                loaded.gsd_m = float((dx / w + dy / h) / 2.0)
+            logger.info("metadata: %s populated corner tiepoints from XML %s", loaded.path, xml_path)
+
     field_by_tag = {
         "Solar_incidence_angle_in_degree": "sidecar_incidence_deg",
         "Sun_elevation_in_degree": "sidecar_sun_elevation_deg",
@@ -2123,12 +2172,20 @@ def _frame_class(sample_xy: list, crs: Optional[object]) -> str:
     CRS wins; otherwise the coordinate magnitudes decide (see
     _GEOGRAPHIC_* — a heuristic whose mistakes become seeds the matcher's
     inlier support rejects, never trusted guesses)."""
+    if sample_xy:
+        xs = [abs(p[0]) for p in sample_xy]
+        ys = [abs(p[1]) for p in sample_xy]
+        if max(xs) > _GEOGRAPHIC_X_MAX or max(ys) > _GEOGRAPHIC_Y_MAX:
+            # Physical coordinates exceed 360/90 degrees -> projected meters,
+            # even if an erroneous planetary GeoTIFF header declared GEOGCS.
+            return "projected"
     if crs is not None:
         return "geographic" if getattr(crs, "is_geographic", False) else "projected"
-    xs = [abs(p[0]) for p in sample_xy]
-    ys = [abs(p[1]) for p in sample_xy]
-    if max(xs) <= _GEOGRAPHIC_X_MAX and max(ys) <= _GEOGRAPHIC_Y_MAX:
-        return "geographic"
+    if sample_xy:
+        xs = [abs(p[0]) for p in sample_xy]
+        ys = [abs(p[1]) for p in sample_xy]
+        if max(xs) <= _GEOGRAPHIC_X_MAX and max(ys) <= _GEOGRAPHIC_Y_MAX:
+            return "geographic"
     return "projected"
 
 

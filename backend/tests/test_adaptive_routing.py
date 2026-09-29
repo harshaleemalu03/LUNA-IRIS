@@ -148,13 +148,18 @@ def test_pipeline_contingency_fallback_on_neural_exception(tmp_path, monkeypatch
     assert summary["contingency_fallback"]["triggered"] is True
     assert summary["contingency_fallback"]["fallback_matcher"] == "pwift"
     assert "CUDA Out of Memory" in summary["contingency_fallback"]["reason"]
-    # Task 4 fail-closed contract: this degraded run also fails the
-    # verification gate (146px disagreement in baseline), so it must be
-    # reported as a failure with outputs withheld — the old behavior wrote
-    # registered products and exited 0.
-    assert summary["passed"] is False
-    assert summary["failure_reason"].startswith("verification_gate_failed")
-    assert not summary["outputs"].get("registered_png")
+    # This assertion used to piggy-back on the OLD gate: the run was rejected
+    # by the translation-only phase check (146px "disagreement"), which could
+    # not tolerate the pair's 2 degree rotation. The rotation-aware check
+    # (TODO-3, tasks/todo-todos.md Task 2) judges the recovered transform
+    # correctly - the PWIFT fallback finds a valid one (struct_ncc ~0.85,
+    # 23/25 inliers, RMSE ~1.1px) - so a degraded-but-correct run passes and
+    # writes its products. Fail-closed behaviour for runs that genuinely fail
+    # verification stays covered by test_fail_closed.py.
+    assert summary["passed"] is True
+    assert summary["failure_reason"] is None
+    assert summary["orthogonal_gate"]["passed"] is True
+    assert summary["outputs"].get("registered_png")
     assert os.path.exists(os.path.join(out_dir, "summary.json"))
 
 

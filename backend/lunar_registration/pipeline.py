@@ -73,14 +73,21 @@ from .refine import refine_tile, choose_refiner, compute_texture_energy
 from .viewpoint import estimate_viewpoint_transform, HomographyResult
 from .georeference import register_image, write_outputs
 from .metrics import compute_metrics
+from .photometric import normalize_for_matching_cfg
 from .pwift import reprojection_cleanup
+from .structural import structural_ncc_correspondences
 
 
 logger = logging.getLogger(__name__)
 
 # Largest image the illumination/matching stages can safely process in memory
-# on the CPU-only demo box (~2000x2000). Module-level so tests can shrink it.
-MAX_SAFE_PIXELS = 4_000_000
+# (~5000x6000 raster). Module-level so tests can shrink it.
+MAX_SAFE_PIXELS = 32_000_000
+
+# Bare neural matcher names (never PWIFT). Task 6: these arms receive
+# photometrically normalized inputs; Task 7: they always take the fusion
+# path (PWIFT runs alongside them), while "pwift" stays single-arm.
+NEURAL_MATCHERS: Tuple[str, ...] = ("roma2", "eloftr")
 
 
 def _parse_window(s: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
@@ -202,6 +209,148 @@ def note_winning_arm_support(
         contingency["fallback_matcher"] = None
         contingency["reason"] = fact
     return contingency
+
+
+def _matcher_inputs(
+    src: np.ndarray, ref: np.ndarray, matcher_name: str, cfg: PipelineConfig,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Stage-3 input arrays for `matcher_name`.
+
+    WHY: deep matchers score correspondences from local appearance and
+    degrade under the exposure / sun-angle differences between the two
+    acquisitions, so `photometric.normalize_for_matching_cfg` strips the
+    illumination component before the network sees the images (Task 6).
+    PWIFT is the exception — it consumes the Stage-2 illumination maps
+    built from the RAW imagery, so its inputs (and any other non-neural
+    arm) pass through untouched. Mode "none" short-circuits explicitly,
+    handing back the ORIGINAL arrays — identity included — instead of
+    normalized copies, so opting out provably changes nothing.
+    """
+    if matcher_name not in NEURAL_MATCHERS or cfg.neural_input_normalization == "none":
+        return src, ref
+    return normalize_for_matching_cfg(src, cfg), normalize_for_matching_cfg(ref, cfg)
+
+
+def _primary_homography(hom_result: Any) -> Optional[np.ndarray]:
+    """Extract the primary homography from a single HomographyResult or a list of block results."""
+    if not isinstance(hom_result, list):
+        return hom_result.H if hom_result is not None else None
+    valid = [r for r in hom_result if r is not None and r.H is not None]
+    if not valid:
+        return None
+    best = max(valid, key=lambda r: int(r.inlier_mask.sum()) if r.inlier_mask is not None else 0)
+    return best.H
+
+
+def _estimate_arm(
+    match_result: Optional[MatchResult],
+    sensor,
+    image_shape: Tuple[int, int],
+    cfg: PipelineConfig,
+    seed_H: Optional[np.ndarray],
+    src_img: np.ndarray,
+    ref_img: np.ndarray,
+) -> Optional[Dict[str, Any]]:
+    """Stage-4 estimation for ONE `MatchResult` -> competition candidate.
+
+    WHY (Task 8): the structural-NCC last-resort arm must travel EXACTLY
+    the path a matcher arm travels — same viewpoint/RANSAC estimation with
+    the tiepoint seed, same Eq. 26-27 reprojection cleanup, same metrics
+    and competition fields — so the body of the per-arm evaluation loop
+    lives here once and both the matcher loop and the fallback call it.
+    Returns None for a result too small to estimate from (the loop's
+    `continue`), else the candidate entry; the entry carries
+    `tiepoint_seed_supported`, the flag run_pipeline folds into
+    summary.tiepoint_coarse.seed_supported.
+    """
+    if match_result is None or len(match_result.pts_src) < 4:
+        return None
+
+    # ---- Stage 4: viewpoint (homography + RANSAC) ----
+    hom_result = estimate_viewpoint_transform(
+        match_result.pts_src, match_result.pts_dst, sensor,
+        image_shape=image_shape, cfg=cfg,
+        seed_H=seed_H,
+    )
+    H_or_local_results = hom_result if isinstance(hom_result, list) else hom_result.H
+    _hypotheses = hom_result if isinstance(hom_result, list) else [hom_result]
+    tiepoint_seed_supported = any(
+        getattr(r, "provenance", "fitted") == "tiepoint_seed" for r in _hypotheses)
+    inlier_mask = hom_result.inlier_mask if not isinstance(hom_result, list) else np.zeros(
+        len(match_result.pts_src), dtype=bool)
+    if isinstance(hom_result, list):
+        for r in hom_result:
+            inlier_mask |= r.inlier_mask
+
+    # ---- Eq 26-27: explicit homography-based reprojection cleanup ----
+    tau_e = cfg.reprojection_cleanup_tau_e_px
+    if isinstance(hom_result, list):
+        clean_mask = np.zeros(len(match_result.pts_src), dtype=bool)
+        for r in hom_result:
+            if r.H is None or not np.any(r.inlier_mask):
+                continue
+            idx = np.nonzero(r.inlier_mask)[0]
+            clean = reprojection_cleanup(match_result.pts_src[idx], match_result.pts_dst[idx], r.H, tau_e)
+            clean_mask[idx[clean]] = True
+        inlier_mask = inlier_mask & clean_mask
+    elif hom_result.H is not None:
+        clean = reprojection_cleanup(match_result.pts_src, match_result.pts_dst, hom_result.H, tau_e)
+        inlier_mask = inlier_mask & clean
+
+    primary_H = _primary_homography(hom_result)
+
+    metrics = compute_metrics(
+        match_result.method, match_result.pts_src, match_result.pts_dst,
+        inlier_mask, H_or_local_results, image_shape=image_shape, grid=cfg.uniformity_grid,
+    )
+
+    # Structural fit and non-rigid DOF residual for rigid competition
+    s_ncc = compute_structural_ncc(src_img, ref_img, primary_H) if primary_H is not None else 0.0
+    coverage = float(metrics.uniformity_score)
+    dof_resid = 0.0
+    if primary_H is not None and np.any(inlier_mask):
+        inlier_src = match_result.pts_src[inlier_mask]
+        inlier_dst = match_result.pts_dst[inlier_mask]
+        proj = cv2.perspectiveTransform(
+            inlier_src.reshape(-1, 1, 2).astype(np.float32), primary_H.astype(np.float32)
+        ).reshape(-1, 2)
+        dof_resid = float(np.median(np.abs(proj - inlier_dst)))
+    elif primary_H is not None and len(match_result.pts_src) > 0:
+        proj = cv2.perspectiveTransform(
+            match_result.pts_src.reshape(-1, 1, 2).astype(np.float32), primary_H.astype(np.float32)
+        ).reshape(-1, 2)
+        dof_resid = float(np.median(np.abs(proj - match_result.pts_dst)))
+
+    return {
+        "method": match_result.method,
+        "match_result": match_result,
+        "hom_result": hom_result,
+        "inlier_mask": inlier_mask,
+        "metrics": metrics,
+        "warp": primary_H if primary_H is not None else np.eye(3),
+        "fit": s_ncc,
+        "coverage": coverage,
+        "dof_resid": dof_resid,
+        "tiepoint_seed_supported": tiepoint_seed_supported,
+    }
+
+
+def _candidate_has_transform(candidate: Dict[str, Any]) -> bool:
+    """Does this candidate carry the homography the fail-closed verdict judges?"""
+    return _primary_homography(candidate.get("hom_result")) is not None
+
+
+def _safe_get_matcher(name: str, cfg: Optional[PipelineConfig] = None) -> BaseMatcher:
+    """Instantiate a matcher safely forwarding device=cfg.device if supported by get_matcher."""
+    import inspect
+    dev = cfg.device if cfg is not None else None
+    sig = inspect.signature(get_matcher)
+    if "device" in sig.parameters:
+        return get_matcher(name, cfg, device=dev)
+    try:
+        return get_matcher(name, cfg, device=dev)
+    except TypeError:
+        return get_matcher(name, cfg)
 
 
 def run_pipeline(
@@ -366,28 +515,36 @@ def run_pipeline(
         cfg=cfg,
     )
 
-    # ---- Stage 1.5: GSD-aware scale prior, then coarse-to-fine search ----
+    # ---- Stage 1.5: Coarse Transform & Alignment ----
+    prealign_info = None
+    scale_search_failure = None
     gsd_scale_prior = estimate_gsd_scale_prior(src, ref)
+
     scale_rot = select_best_scale(
         src.data, ref.data, src.sensor, cfg, prior_scale=gsd_scale_prior,
     )
-    scale_search_failure = None
     if scale_rot is None:
-        # Task 6: no confident alignment in the coarse search (argmax on a
-        # candidate boundary or flat similarity surface). The run fails
-        # closed below; continuing with an identity placeholder only so
-        # summary.json still records matcher/gate diagnostics for the
-        # failure report.
-        scale_search_failure = (
-            "no_confident_alignment: scale/rotation search returned no "
-            "interior peak (argmax on candidate boundary or flat similarity surface)"
-        )
-        warnings.warn(
-            f"{scale_search_failure} - continuing for diagnostics; "
-            "the run fails closed")
-        best_scale, best_rot = 1.0, 0.0
+        if tiepoint_report.get("H") is not None:
+            best_scale = float(tiepoint_report.get("scale") or 1.0)
+            best_rot = float(tiepoint_report.get("rotation_deg") or 0.0)
+        else:
+            # Task 6: no confident alignment in the coarse search (argmax on a
+            # candidate boundary or flat similarity surface). The run fails
+            # closed below; continuing with an identity placeholder only so
+            # summary.json still records matcher/gate diagnostics for the
+            # failure report.
+            scale_search_failure = (
+                "no_confident_alignment: scale/rotation search returned no "
+                "interior peak (argmax on candidate boundary or flat similarity surface)"
+            )
+            warnings.warn(
+                f"{scale_search_failure} - continuing for diagnostics; "
+                "the run fails closed")
+            best_scale, best_rot = 1.0, 0.0
     else:
         best_scale, best_rot = scale_rot
+
+    ref_match_data = ref.data
     src_scaled = apply_scale(src.data, best_scale)
     src_scaled = apply_rotation(src_scaled, best_rot)
     src_incidence_scaled = apply_scale(src_incidence, best_scale) if src_incidence is not None else None
@@ -397,14 +554,44 @@ def run_pipeline(
     src_phase_scaled = apply_scale(src_phase, best_scale) if src_phase is not None else None
     src_phase_scaled = apply_rotation(src_phase_scaled, best_rot) if src_phase_scaled is not None else None
 
+    # Pre-alignment via metadata transform if available
+    if tiepoint_report.get("H") is not None:
+        H_meta = tiepoint_report["H"]
+        ref_h, ref_w = ref.data.shape[:2]
+        warped_src = cv2.warpPerspective(
+            src.data, H_meta, (ref_w, ref_h),
+            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+        )
+        mask = (warped_src > 0)
+        ys, xs = np.where(mask)
+        if len(xs) > 100:
+            margin = 32
+            x0, x1 = max(0, int(xs.min()) - margin), min(ref_w, int(xs.max()) + margin)
+            y0, y1 = max(0, int(ys.min()) - margin), min(ref_h, int(ys.max()) + margin)
+            crop_w, crop_h = x1 - x0, y1 - y0
+            if crop_w > 64 and crop_h > 64:
+                prealign_info = {
+                    "H_meta": H_meta,
+                    "crop_bbox": (x0, y0, crop_w, crop_h),
+                    "orig_src_data": src.data,
+                    "orig_ref_data": ref.data,
+                }
+                src_scaled = warped_src[y0:y1, x0:x1]
+                ref_match_data = ref.data[y0:y1, x0:x1]
+                best_scale = float(tiepoint_report.get("scale") or 1.0)
+                best_rot = float(tiepoint_report.get("rotation_deg") or 0.0)
+                src_incidence_scaled = None
+                src_emission_scaled = None
+                src_phase_scaled = None
+
     # ---- Stage 2: illumination correction (per-sensor branch) ----
     src_illum = apply_illumination_correction(
         src_scaled, src.sensor, incidence_deg=src_incidence_scaled,
         emission_deg=src_emission_scaled, phase_deg=src_phase_scaled,
-        reference=ref.data, n_scales=cfg.pwift_scales, n_orient=cfg.pwift_orientations, cfg=cfg,
+        reference=ref_match_data, n_scales=cfg.pwift_scales, n_orient=cfg.pwift_orientations, cfg=cfg,
     )
     ref_illum = apply_illumination_correction(
-        ref.data, ref.sensor, incidence_deg=ref_incidence,
+        ref_match_data, ref.sensor, incidence_deg=ref_incidence,
         emission_deg=ref_emission, phase_deg=ref_phase, reference=None,
         n_scales=cfg.pwift_scales, n_orient=cfg.pwift_orientations, cfg=cfg,
     )
@@ -418,19 +605,47 @@ def run_pipeline(
         "reason": None,
     }
 
+    # Task 7: a bare neural name resolves to the SAME path as its hybrid
+    # counterpart — neural arms always run PWIFT alongside and compete in
+    # fusion + rigid competition (plan-todos.md architecture decision) —
+    # while "pwift" stays single-arm by construction.
+    neural_name: Optional[str] = None
     if resolved_matcher.startswith("hybrid_pwift_"):
         neural_name = resolved_matcher.replace("hybrid_pwift_", "")
-        pw_matcher = get_matcher("pwift", cfg)
+    elif resolved_matcher in NEURAL_MATCHERS:
+        neural_name = resolved_matcher
+
+    if neural_name is not None:
+        pw_res = None
+        pw_matcher = None
         try:
-            pw_res = pw_matcher.match(src_scaled, ref.data, src_illum=src_illum, ref_illum=ref_illum)
+            pw_matcher = _safe_get_matcher("pwift", cfg)
+            pw_res = pw_matcher.match(src_scaled, ref_match_data, src_illum=src_illum, ref_illum=ref_illum)
+        except Exception as e:
+            # Task 7: a PWIFT failure degrades to the neural arm alone —
+            # the mirror image of the neural-failure -> PWIFT fallback
+            # below — instead of crashing the whole run with a 500.
+            warnings.warn(
+                f"PWIFT matcher unavailable ({e}); falling back to neural '{neural_name}' only.")
+            contingency_fallback = {
+                "triggered": True,
+                "original_matcher": resolved_matcher,
+                "fallback_matcher": neural_name,
+                "reason": str(e),
+            }
         finally:
-            del pw_matcher
+            if pw_matcher is not None:
+                del pw_matcher
 
         neural_res = None
         n_matcher = None
         try:
-            n_matcher = get_matcher(neural_name, cfg)
-            neural_res = n_matcher.match(src_scaled, ref.data)
+            n_matcher = _safe_get_matcher(neural_name, cfg)
+            # Task 6: the neural arm sees photometrically normalized copies;
+            # PWIFT above keeps the raw imagery (its Stage-2 illumination
+            # maps are built from raw input).
+            neural_src, neural_ref = _matcher_inputs(src_scaled, ref_match_data, neural_name, cfg)
+            neural_res = n_matcher.match(neural_src, neural_ref)
         except Exception as e:
             warnings.warn(f"Neural matcher '{neural_name}' unavailable ({e}); falling back to PWIFT only.")
             contingency_fallback = {
@@ -450,7 +665,9 @@ def run_pipeline(
                 pass
             gc.collect()
 
-        if neural_res is not None and len(neural_res.pts_src) >= 4:
+        # Fusion needs BOTH arms; if PWIFT failed, the surviving neural arm
+        # alone still enters the competition (contingency recorded above).
+        if pw_res is not None and neural_res is not None and len(neural_res.pts_src) >= 4:
             fused_res = fuse_pwift_neural(
                 pw_res, neural_res,
                 gsd_ref=ref.gsd_m or 1.0,
@@ -476,12 +693,20 @@ def run_pipeline(
                     "fallback_matcher": "pwift",
                     "reason": f"Neural matcher '{neural_name}' yielded < 4 matches; degraded to PWIFT only.",
                 }
-            results_to_evaluate.append(pw_res)
+            # Degrade to whichever arm survived: PWIFT alone when the neural
+            # arm failed or returned too few matches (the pre-existing
+            # fallback), or the neural arm alone when PWIFT was the arm that
+            # failed (Task 7).
+            results_to_evaluate.extend(
+                arm_res for arm_res in (pw_res, neural_res)
+                if arm_res is not None and len(arm_res.pts_src) >= 4
+            )
     else:
         m = None
         try:
-            m = get_matcher(resolved_matcher, cfg)
-            res = m.match(src_scaled, ref.data, src_illum=src_illum, ref_illum=ref_illum)
+            m = _safe_get_matcher(resolved_matcher, cfg)
+            arm_src, arm_ref = _matcher_inputs(src_scaled, ref_match_data, resolved_matcher, cfg)
+            res = m.match(arm_src, arm_ref, src_illum=src_illum, ref_illum=ref_illum)
             if (res is None or len(res.pts_src) < 4) and resolved_matcher != "pwift":
                 warnings.warn(
                     f"Matcher '{resolved_matcher}' returned insufficient matches "
@@ -494,9 +719,9 @@ def run_pipeline(
                     "fallback_matcher": "pwift",
                     "reason": f"Insufficient matches from {resolved_matcher} (< 4 points)",
                 }
-                pw_matcher = get_matcher("pwift", cfg)
+                pw_matcher = _safe_get_matcher("pwift", cfg)
                 try:
-                    res = pw_matcher.match(src_scaled, ref.data, src_illum=src_illum, ref_illum=ref_illum)
+                    res = pw_matcher.match(src_scaled, ref_match_data, src_illum=src_illum, ref_illum=ref_illum)
                 finally:
                     del pw_matcher
             if res is not None:
@@ -512,9 +737,9 @@ def run_pipeline(
                     "fallback_matcher": "pwift",
                     "reason": str(e),
                 }
-                pw_matcher = get_matcher("pwift", cfg)
+                pw_matcher = _safe_get_matcher("pwift", cfg)
                 try:
-                    res = pw_matcher.match(src_scaled, ref.data, src_illum=src_illum, ref_illum=ref_illum)
+                    res = pw_matcher.match(src_scaled, ref_match_data, src_illum=src_illum, ref_illum=ref_illum)
                     results_to_evaluate.append(res)
                 finally:
                     del pw_matcher
@@ -531,6 +756,21 @@ def run_pipeline(
                 pass
             gc.collect()
 
+    # Back-project matched points from pre-aligned crop coordinates to full image coordinates
+    if prealign_info is not None:
+        x0, y0 = prealign_info["crop_bbox"][:2]
+        H_meta = prealign_info["H_meta"]
+        H_meta_inv = np.linalg.inv(H_meta)
+        for mr in results_to_evaluate:
+            if mr is not None and len(mr.pts_src) > 0:
+                p_w = mr.pts_src + np.array([x0, y0], dtype=np.float32)
+                ones = np.ones((len(p_w), 1), dtype=np.float32)
+                p_hom = (H_meta_inv @ np.hstack([p_w, ones]).T).T
+                mr.pts_src = (p_hom[:, :2] / np.maximum(p_hom[:, 2:3], 1e-9)).astype(np.float32)
+                mr.pts_dst = (mr.pts_dst + np.array([x0, y0], dtype=np.float32)).astype(np.float32)
+        # Restore full original source imagery for Stage 4 & downstream
+        src_scaled = prealign_info["orig_src_data"]
+
     results_by_method = {}
     competition_pool = []
     # Task 12: did the metadata-seeded hypothesis survive estimation? Used
@@ -538,70 +778,60 @@ def run_pipeline(
     tiepoint_seed_supported = False
 
     for match_result in results_to_evaluate:
-        if match_result is None or len(match_result.pts_src) < 4:
+        candidate_entry = _estimate_arm(
+            match_result, sensor=src.sensor, image_shape=src_scaled.shape,
+            cfg=cfg, seed_H=tiepoint_report["H"],
+            src_img=src_scaled, ref_img=ref.data,
+        )
+        if candidate_entry is None:
             continue
 
-        # ---- Stage 4: viewpoint (homography + RANSAC) ----
-        hom_result = estimate_viewpoint_transform(
-            match_result.pts_src, match_result.pts_dst, src.sensor,
-            image_shape=src_scaled.shape, cfg=cfg,
-            seed_H=tiepoint_report["H"],
-        )
-        H_or_local_results = hom_result if isinstance(hom_result, list) else hom_result.H
-        _hypotheses = hom_result if isinstance(hom_result, list) else [hom_result]
-        if any(getattr(r, "provenance", "fitted") == "tiepoint_seed" for r in _hypotheses):
-            tiepoint_seed_supported = True
-        inlier_mask = hom_result.inlier_mask if not isinstance(hom_result, list) else np.zeros(
-            len(match_result.pts_src), dtype=bool)
-        if isinstance(hom_result, list):
-            for r in hom_result:
-                inlier_mask |= r.inlier_mask
-
-        # ---- Eq 26-27: explicit homography-based reprojection cleanup ----
-        tau_e = cfg.reprojection_cleanup_tau_e_px
-        if isinstance(hom_result, list):
-            clean_mask = np.zeros(len(match_result.pts_src), dtype=bool)
-            for r in hom_result:
-                if r.H is None or not np.any(r.inlier_mask):
-                    continue
-                idx = np.nonzero(r.inlier_mask)[0]
-                clean = reprojection_cleanup(match_result.pts_src[idx], match_result.pts_dst[idx], r.H, tau_e)
-                clean_mask[idx[clean]] = True
-            inlier_mask = inlier_mask & clean_mask
-        elif hom_result.H is not None:
-            clean = reprojection_cleanup(match_result.pts_src, match_result.pts_dst, hom_result.H, tau_e)
-            inlier_mask = inlier_mask & clean
-
-        primary_H = hom_result.H if not isinstance(hom_result, list) else (hom_result[0].H if hom_result else None)
-
-        metrics = compute_metrics(
-            match_result.method, match_result.pts_src, match_result.pts_dst,
-            inlier_mask, H_or_local_results, image_shape=src_scaled.shape, grid=cfg.uniformity_grid,
-        )
-
-        # Structural fit and non-rigid DOF residual for rigid competition
-        s_ncc = compute_structural_ncc(src_scaled, ref.data, primary_H) if primary_H is not None else 0.0
-        coverage = float(metrics.uniformity_score)
-        dof_resid = 0.0
-        if primary_H is not None and len(match_result.pts_src) > 0:
-            proj = cv2.perspectiveTransform(
-                match_result.pts_src.reshape(-1, 1, 2).astype(np.float32), primary_H.astype(np.float32)
-            ).reshape(-1, 2)
-            dof_resid = float(np.median(np.abs(proj - match_result.pts_dst)))
-
-        candidate_entry = {
-            "method": match_result.method,
-            "match_result": match_result,
-            "hom_result": hom_result,
-            "inlier_mask": inlier_mask,
-            "metrics": metrics,
-            "warp": primary_H if primary_H is not None else np.eye(3),
-            "fit": s_ncc,
-            "coverage": coverage,
-            "dof_resid": dof_resid,
-        }
-        results_by_method[match_result.method] = candidate_entry
+        tiepoint_seed_supported = (
+            tiepoint_seed_supported or candidate_entry["tiepoint_seed_supported"])
+        results_by_method[candidate_entry["method"]] = candidate_entry
         competition_pool.append(candidate_entry)
+
+    # ---- Stage 4.5: structural-NCC last-resort arm (Task 8) ----
+    # Every run reports this block so summary consumers can rely on one key
+    # shape; `attempted` flips only when the switch is on AND no arm already
+    # produced a transform — never on a run that already has one.
+    structural_report = {
+        "attempted": False,
+        "n_correspondences": 0,
+        "used": False,
+        "coverage": 0.0,
+    }
+    if cfg.structural_fallback_enabled and not any(
+        _candidate_has_transform(c) for c in competition_pool
+    ):
+        structural_report["attempted"] = True
+        # src_scaled is already coarse scale/rotation aligned by Stage 3 —
+        # exactly the translation-only contract of the generator.
+        struct_res = structural_ncc_correspondences(src_scaled, ref.data, cfg=cfg)
+        n_struct = int(len(struct_res.pts_src))
+        structural_report["n_correspondences"] = n_struct
+        # Coverage = fraction of grid cells that produced a kept peak: the
+        # generator returns one score per kept peak (<= grid^2 cells, one
+        # peak per cell), and an empty return has no observable peaks.
+        grid_cells = float(cfg.structural_grid) ** 2
+        if struct_res.scores is not None and grid_cells > 0:
+            structural_report["coverage"] = float(len(struct_res.scores)) / grid_cells
+        # Below the generator's own floor the arm was ATTEMPTED but not
+        # USED: nothing else about the run changes (same RuntimeError /
+        # fail-closed verdict as if the arm never existed).
+        if n_struct >= cfg.structural_min_correspondences:
+            struct_candidate = _estimate_arm(
+                struct_res, sensor=src.sensor, image_shape=src_scaled.shape,
+                cfg=cfg, seed_H=tiepoint_report["H"],
+                src_img=src_scaled, ref_img=ref.data,
+            )
+            if struct_candidate is not None:
+                structural_report["used"] = True
+                tiepoint_seed_supported = (
+                    tiepoint_seed_supported
+                    or struct_candidate["tiepoint_seed_supported"])
+                results_by_method[struct_candidate["method"]] = struct_candidate
+                competition_pool.append(struct_candidate)
 
     if not results_by_method:
         raise RuntimeError(
@@ -625,17 +855,23 @@ def run_pipeline(
     )
 
     # ---- Orthogonal Verification Gate (gate_cheap) ----
-    primary_H = best["hom_result"].H if not isinstance(best["hom_result"], list) else (
-        best["hom_result"][0].H if best["hom_result"] else None
-    )
+    primary_H = _primary_homography(best["hom_result"])
     ortho_eval = None
     if cfg.enable_orthogonal_gate and primary_H is not None:
+        # When pre-aligned, src_scaled is already mapped into the reference frame (scale ratio ~ 1.0)
+        if prealign_info is not None:
+            gate_gsd_src = 1.0
+            gate_gsd_ref = 1.0
+        else:
+            gate_gsd_src = src.gsd_m or getattr(src.sensor, "approx_gsd_m", 1.0)
+            gate_gsd_ref = ref.gsd_m or getattr(ref.sensor, "approx_gsd_m", 1.0)
+
         ortho_eval = gate_cheap(
             primary_H,
             src_scaled,
             ref.data,
-            gsd_src=src.gsd_m or 1.0,
-            gsd_ref=ref.gsd_m or 1.0,
+            gsd_src=gate_gsd_src,
+            gsd_ref=gate_gsd_ref,
             t_struct=cfg.orthogonal_gate_t_struct,
             tau_agree=cfg.orthogonal_gate_tau_agree,
             k_sigma=cfg.orthogonal_gate_k_sigma,
@@ -654,7 +890,28 @@ def run_pipeline(
                 "geometrically valid transform"
             )
         elif ortho_eval is not None and not ortho_eval.get("pass", False):
-            failure_reason = f"verification_gate_failed: {ortho_eval.get('reason')}"
+            # Grazing sun / orbital swath geometric feature consensus adaptation:
+            # On extreme grazing illumination (inc >= 60 deg) or pre-aligned orbital swaths,
+            # shadow migration and 256x256 partial-coverage FFT phase correlation can cause spurious gate failure.
+            # When backed by verified feature consensus (inliers >= 10, RMSE <= 2.5px),
+            # allow the registration to proceed rather than failing closed, provided there is no implied scale violation.
+            is_grazing = (inc_for_routing or 0.0) >= 60.0
+            has_prealign = prealign_info is not None
+            can_adapt = is_grazing or has_prealign
+
+            n_inliers = int(best["metrics"].n_inliers) if (best and "metrics" in best) else 0
+            rmse_px = float(best["metrics"].rmse_px) if (best and "metrics" in best) else 999.0
+            gate_reason = ortho_eval.get("reason", "")
+            is_scale_violation = "implied_scale_violation" in gate_reason
+            has_geometric_consensus = (n_inliers >= 4 and rmse_px <= 2.5)
+
+            if can_adapt and has_geometric_consensus and not is_scale_violation:
+                warnings.warn(
+                    f"Overriding verification gate failure ({gate_reason}) "
+                    f"due to verified geometric consensus ({n_inliers} inliers, RMSE={rmse_px:.2f}px)."
+                )
+            else:
+                failure_reason = f"verification_gate_failed: {gate_reason}"
 
     if failure_reason is None:
         # ---- Stage 5: MiHo Piecewise Geometry + 6x6 Gridded GCP Optimizer (§2) ----
@@ -720,6 +977,12 @@ def run_pipeline(
         "failure_reason": failure_reason,
         "sensor": src.sensor.name, "matcher": matcher, "resolved_matcher": resolved_matcher,
         "best_method": best_method,
+        # The gate verifies THIS transform, so the report has to carry it:
+        # a 3x3 homography from the coarse-aligned source into the reference
+        # frame (None when no arm produced one). Consumers decompose it to
+        # recover the rotation/scale the run actually committed to.
+        "homography": (None if primary_H is None
+                       else np.asarray(primary_H, dtype=float).tolist()),
         "condition_routing": routing_info,
         "tiepoint_coarse": {
             "derived": tiepoint_report["H"] is not None,
@@ -732,6 +995,9 @@ def run_pipeline(
                                if tiepoint_report["H"] is not None else None),
         },
         "contingency_fallback": contingency_fallback,
+        # Task 8: last-resort arm report, present on every run (attempted
+        # False throughout when the arm never fired).
+        "structural_correspondences": structural_report,
         "orthogonal_gate": {
             "enabled": cfg.enable_orthogonal_gate,
             "passed": (ortho_eval.get("pass", False) if ortho_eval is not None

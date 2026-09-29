@@ -306,10 +306,14 @@ def resolve_romav2_weights(weights_path: Optional[Union[str, Path]] = None) -> P
         if p.exists():
             return p
 
-    repo_root = Path(__file__).resolve().parent.parent
+    this_file = Path(__file__).resolve()
+    repo_root = this_file.parent.parent.parent  # <repo_root>
+    backend_root = this_file.parent.parent       # <repo_root>/backend
     candidates = [
         repo_root / "models" / "romav2_stereolunar_finetuned.pt",
         repo_root / "weights" / "romav2_stereolunar_finetuned.pt",
+        backend_root / "models" / "romav2_stereolunar_finetuned.pt",
+        repo_root.parent / "luna-tics" / "models" / "romav2_stereolunar_finetuned.pt",
         Path("/home/ojas/projects/SIH/illumination_variation/models/romav2_stereolunar_finetuned.pt"),
     ]
     for c in candidates:
@@ -375,9 +379,11 @@ class Roma2Matcher(BaseMatcher):
         max_keypoints: int = 2048,
         cfg_setting: str = "fast",
         tile_size: int = 800,
+        cfg: Optional[PipelineConfig] = None,
     ):
         import torch
 
+        self.cfg = cfg or PipelineConfig()
         self.max_keypoints = max_keypoints
         self.cfg_setting = cfg_setting
         self.tile_size = tile_size
@@ -457,6 +463,8 @@ class Roma2Matcher(BaseMatcher):
                 t = t.permute(2, 0, 1)
         if t.dtype == torch.uint8:
             t = t.float() / 255.0
+        elif t.dtype.is_floating_point and float(t.max()) > 1.0:
+            t = t / 255.0
         else:
             t = t.float()
         return t.unsqueeze(0).to(self.device)
@@ -483,17 +491,39 @@ class Roma2Matcher(BaseMatcher):
             tiles_src = self._generate_tiles(src_img, self.tile_size, overlap=0.15)
             tiles_ref = self._generate_tiles(ref_img, self.tile_size, overlap=0.15)
 
+        # Build candidate tile pairs based on spatial overlap IoU
+        tile_pairs = []
+        min_iou = getattr(self.cfg, "roma2_min_tile_iou", 0.40)
+        for t_s in tiles_src:
+            bb_s = t_s["bbox"]
+            area_s = bb_s[2] * bb_s[3]
+            for t_r in tiles_ref:
+                bb_r = t_r["bbox"]
+                area_r = bb_r[2] * bb_r[3]
+                ix0 = max(bb_s[0], bb_r[0])
+                iy0 = max(bb_s[1], bb_r[1])
+                ix1 = min(bb_s[0] + bb_s[2], bb_r[0] + bb_r[2])
+                iy1 = min(bb_s[1] + bb_s[3], bb_r[1] + bb_r[3])
+                inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+                union = area_s + area_r - inter
+                iou = inter / max(1, union)
+                if iou >= min_iou:
+                    tile_pairs.append((t_s, t_r))
+
+        if not tile_pairs:
+            # Fallback to index-based pairing if coordinates are disjoint or arbitrary
+            n_fallback = min(len(tiles_src), len(tiles_ref))
+            tile_pairs = [(tiles_src[i], tiles_ref[i]) for i in range(n_fallback)]
+
+        n_pairs = len(tile_pairs)
+        kpts_per_tile = max(128, self.max_keypoints // max(1, n_pairs))
+
         all_pts0 = []
         all_pts1 = []
         all_conf = []
 
-        n_pairs = min(len(tiles_src), len(tiles_ref))
-        kpts_per_tile = max(128, self.max_keypoints // max(1, n_pairs))
-
         with torch.inference_mode():
-            for i in range(n_pairs):
-                t_s = tiles_src[i]
-                t_r = tiles_ref[i]
+            for t_s, t_r in tile_pairs:
                 im0 = t_s["tile"]
                 im1 = t_r["tile"]
                 bb0 = t_s["bbox"]
@@ -538,6 +568,14 @@ class Roma2Matcher(BaseMatcher):
                 p0 = mkpts0.detach().cpu().numpy().reshape(-1, 2)
                 p1 = mkpts1.detach().cpu().numpy().reshape(-1, 2)
                 conf = confidence.detach().cpu().numpy().reshape(-1)
+
+                min_conf = getattr(self.cfg, "roma2_min_confidence", 0.15)
+                if min_conf > 0.0 and len(conf) > 0:
+                    keep = conf >= min_conf
+                    if keep.sum() >= 16:
+                        p0 = p0[keep]
+                        p1 = p1[keep]
+                        conf = conf[keep]
 
                 p0[:, 0] += bb0[0]
                 p0[:, 1] += bb0[1]
@@ -612,10 +650,14 @@ def resolve_eloftr_checkpoint(checkpoint_path: Optional[Union[str, Path]] = None
         if p.exists():
             return p
 
-    repo_root = Path(__file__).resolve().parent.parent
+    this_file = Path(__file__).resolve()
+    repo_root = this_file.parent.parent.parent  # <repo_root>
+    backend_root = this_file.parent.parent       # <repo_root>/backend
     candidates = [
         repo_root / "models" / "eloftr_lunar.ckpt",
         repo_root / "weights" / "eloftr_lunar.ckpt",
+        backend_root / "models" / "eloftr_lunar.ckpt",
+        repo_root.parent / "luna-tics" / "models" / "eloftr_lunar.ckpt",
         repo_root / "finetune" / "EfficientLoFTR" / "logs" / "tb_logs" / "lunar_full_finetune" / "version_1" / "checkpoints" / "epoch=0-auc@5=0.788-auc@10=0.853-auc@20=0.899.ckpt",
         Path("/home/ojas/projects/SIH/illumination_variation/finetune/EfficientLoFTR/logs/tb_logs/lunar_full_finetune/version_1/checkpoints/epoch=0-auc@5=0.788-auc@10=0.853-auc@20=0.899.ckpt"),
     ]
@@ -749,60 +791,114 @@ class EloftrMatcher(BaseMatcher):
         t = torch.from_numpy(a).unsqueeze(0).unsqueeze(0).float().to(self.device)
         return t, (orig_h, orig_w)
 
+    def _generate_tiles(self, img: np.ndarray, tile_size: int = 800, overlap: float = 0.15) -> List[Dict[str, Any]]:
+        h, w = img.shape[:2]
+        step = int(tile_size * (1.0 - overlap))
+        tiles = []
+        for y in range(0, max(1, h - tile_size + step), step):
+            for x in range(0, max(1, w - tile_size + step), step):
+                x_end = min(x + tile_size, w)
+                y_end = min(y + tile_size, h)
+                tile = img[y:y_end, x:x_end]
+                tiles.append({"tile": tile, "bbox": (x, y, x_end - x, y_end - y)})
+        return tiles
+
     def match(
         self,
         src_img: np.ndarray,
         ref_img: np.ndarray,
         src_illum: Optional[Union[PWIFTMaps, np.ndarray]] = None,
         ref_illum: Optional[Union[PWIFTMaps, np.ndarray]] = None,
+        tile_size: int = 800,
         **kwargs,
     ) -> MatchResult:
         import torch
 
         t0 = time.perf_counter()
-        t_src, (h0, w0) = self._prepare_gray_tensor(src_img)
-        t_ref, (h1, w1) = self._prepare_gray_tensor(ref_img)
+        h0, w0 = src_img.shape[:2]
+        h1, w1 = ref_img.shape[:2]
 
-        b = {"image0": t_src, "image1": t_ref}
+        max_dim = max(h0, w0, h1, w1)
+        if max_dim <= tile_size:
+            tile_pairs = [({"tile": src_img, "bbox": (0, 0, w0, h0)}, {"tile": ref_img, "bbox": (0, 0, w1, h1)})]
+        else:
+            tiles_src = self._generate_tiles(src_img, tile_size, overlap=0.15)
+            tiles_ref = self._generate_tiles(ref_img, tile_size, overlap=0.15)
+            tile_pairs = []
+            for t_s in tiles_src:
+                bb_s = t_s["bbox"]
+                for t_r in tiles_ref:
+                    bb_r = t_r["bbox"]
+                    ix0 = max(bb_s[0], bb_r[0])
+                    iy0 = max(bb_s[1], bb_r[1])
+                    ix1 = min(bb_s[0] + bb_s[2], bb_r[0] + bb_r[2])
+                    iy1 = min(bb_s[1] + bb_s[3], bb_r[1] + bb_r[3])
+                    inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+                    min_area = min(bb_s[2] * bb_s[3], bb_r[2] * bb_r[3])
+                    if min_area > 0 and inter / min_area >= 0.15:
+                        tile_pairs.append((t_s, t_r))
+            if not tile_pairs:
+                n_fallback = min(len(tiles_src), len(tiles_ref))
+                tile_pairs = [(tiles_src[i], tiles_ref[i]) for i in range(n_fallback)]
+
+        all_pts0 = []
+        all_pts1 = []
+        all_conf = []
 
         with torch.inference_mode():
-            try:
-                if self.device.type == "cuda":
-                    with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        self.model(b)
-                    torch.cuda.synchronize()
-                else:
-                    self.model(b)
-            except torch.cuda.OutOfMemoryError:
-                import warnings
-                warnings.warn("EfficientLoFTR CUDA OOM during inference; falling back to CPU.")
-                torch.cuda.empty_cache()
-                self.device = torch.device("cpu")
-                self.model = self.model.to(self.device)
-                t_src, (h0, w0) = self._prepare_gray_tensor(src_img)
-                t_ref, (h1, w1) = self._prepare_gray_tensor(ref_img)
+            for t_s, t_r in tile_pairs:
+                im0 = t_s["tile"]
+                im1 = t_r["tile"]
+                bb0 = t_s["bbox"]
+                bb1 = t_r["bbox"]
+
+                t_src, (th0, tw0) = self._prepare_gray_tensor(im0)
+                t_ref, (th1, tw1) = self._prepare_gray_tensor(im1)
                 b = {"image0": t_src, "image1": t_ref}
-                self.model(b)
 
-        pts0 = b["mkpts0_f"].detach().cpu().numpy().reshape(-1, 2).astype(np.float32)
-        pts1 = b["mkpts1_f"].detach().cpu().numpy().reshape(-1, 2).astype(np.float32)
-        conf = b.get("mconf")
-        scores = conf.detach().cpu().numpy().reshape(-1).astype(np.float32) if conf is not None else np.ones(len(pts0), dtype=np.float32)
+                try:
+                    if self.device.type == "cuda":
+                        with torch.autocast(device_type="cuda", dtype=torch.float16):
+                            self.model(b)
+                        torch.cuda.synchronize()
+                    else:
+                        self.model(b)
+                except torch.cuda.OutOfMemoryError:
+                    import warnings
+                    warnings.warn("EfficientLoFTR CUDA OOM during inference; falling back to CPU.")
+                    torch.cuda.empty_cache()
+                    self.device = torch.device("cpu")
+                    self.model = self.model.to(self.device)
+                    t_src, (th0, tw0) = self._prepare_gray_tensor(im0)
+                    t_ref, (th1, tw1) = self._prepare_gray_tensor(im1)
+                    b = {"image0": t_src, "image1": t_ref}
+                    self.model(b)
 
-        # Filter out points in padded border regions
-        if len(pts0) > 0:
-            valid = (pts0[:, 0] < w0) & (pts0[:, 1] < h0) & (pts1[:, 0] < w1) & (pts1[:, 1] < h1)
-            pts0 = pts0[valid]
-            pts1 = pts1[valid]
-            scores = scores[valid]
+                pts0 = b["mkpts0_f"].detach().cpu().numpy().reshape(-1, 2).astype(np.float32)
+                pts1 = b["mkpts1_f"].detach().cpu().numpy().reshape(-1, 2).astype(np.float32)
+                conf = b.get("mconf")
+                scores = conf.detach().cpu().numpy().reshape(-1).astype(np.float32) if conf is not None else np.ones(len(pts0), dtype=np.float32)
+
+                if len(pts0) > 0:
+                    valid = (pts0[:, 0] < tw0) & (pts0[:, 1] < th0) & (pts1[:, 0] < tw1) & (pts1[:, 1] < th1)
+                    p0 = pts0[valid] + np.array([bb0[0], bb0[1]], dtype=np.float32)
+                    p1 = pts1[valid] + np.array([bb1[0], bb1[1]], dtype=np.float32)
+                    s = scores[valid]
+                    all_pts0.append(p0)
+                    all_pts1.append(p1)
+                    all_conf.append(s)
+
+        final_pts0 = np.vstack(all_pts0) if all_pts0 else np.zeros((0, 2), dtype=np.float32)
+        final_pts1 = np.vstack(all_pts1) if all_pts1 else np.zeros((0, 2), dtype=np.float32)
+        final_conf = np.concatenate(all_conf) if all_conf else np.zeros(0, dtype=np.float32)
 
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
         return MatchResult(
             method="eloftr",
-            pts_src=pts0,
-            pts_dst=pts1,
-            scores=scores,
+            pts_src=final_pts0,
+            pts_dst=final_pts1,
+            scores=final_conf,
             provenance="direct",
             latency_ms=latency_ms,
         )
@@ -831,6 +927,7 @@ def get_matcher(
             max_keypoints=cfg.roma2_max_keypoints,
             cfg_setting=cfg.roma2_cfg_setting,
             tile_size=cfg.roma2_tile_size,
+            cfg=cfg,
         )
     elif clean_name in ("eloftr", "efficientloftr", "loftr"):
         return EloftrMatcher(
