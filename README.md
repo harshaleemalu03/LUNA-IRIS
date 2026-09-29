@@ -1,5 +1,5 @@
 ---
-title: LUNA-IRiS
+title: LUNA-IRIS
 sdk: gradio
 app_file: app.py
 ---
