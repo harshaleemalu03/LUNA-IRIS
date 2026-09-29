@@ -2,7 +2,7 @@
 # (.venv, Python 3.12) so a cold install reproduces the tested stack (TODO-5).
 # Refresh the pins with: uv pip list --python .venv/bin/python --format=freeze
 numpy==1.26.4
-scipy==1.17.1
+scipy==1.15.3
 opencv-python==4.11.0.86
 pillow==12.3.0
 rasterio==1.4.4
